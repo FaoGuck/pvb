@@ -42,6 +42,11 @@ def main(sf: int = 2048):
     st = open(glob.glob(os.path.join(out, "runs", "P201_d5_audit", "*", "avccep_structure.txt"))[0], encoding="utf-8").read()
     assert "n1_peak_sample" in st and "stimpnames" in st
 
+    run("scripts/p201b_timing.py", env)
+    b = pd.read_csv(glob.glob(os.path.join(out, "runs", "P201b_d5_timing", "*", "runs.tsv"))[0], sep="\t").iloc[0]
+    assert abs(b.edge_lat_med_ms) <= 1000 / sf + 1e-6, f"邻近电极的伪迹边沿不在 0：{b.edge_lat_med_ms}"
+    assert glob.glob(os.path.join(out, "runs", "P201b_d5_timing", "*", "figures", "*.png"))
+
     run("scripts/p202_ccep_labels.py", env)
     lab = pd.read_parquet(os.path.join(data, "t2", "d5", "ccep_labels", f"{sim_d5.SUB}_labels.parquet"))
     pairs = sorted(lab.stim_pair.unique())

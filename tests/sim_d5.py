@@ -60,6 +60,7 @@ def make_sim(root: str, seed: int = 0, SF: int = SF) -> str:
             resp = -900 * np.exp(-dist / 12) * np.exp(-0.5 * ((tt - 0.020) / 0.005) ** 2)
             resp += 150 * np.exp(-dist / 12) * np.exp(-0.5 * ((tt - 0.300) / 0.08) ** 2)
             x[c, s0:s0 + tt.size] += resp
+            x[c, s0:s0 + max(1, int(0.001 * SF))] += 2000 * np.exp(-dist / 20)   # 传导到邻近电极的刺激伪迹（0–1 ms）
     _bv(base, x, SF)
     json.dump({"TaskName": "task-SPESclin", "SamplingFrequency": SF, "RecordingDuration": n / SF, "ECOGChannelCount": 8},
               open(base + "_ieeg.json", "w"))

@@ -1,0 +1,123 @@
+# pvb-p201b-timing-gate（P201 追加：刺激时间零点诊断）：由 pvb-run-d5.yaml 复制（改 name、★1、★2、exec_timeout）。
+# PVB 的 T2（D5 = ds004080）运行器：按患者逐个挂载原始数据（全量下完后整个前缀约 270 GB，不能整体拉）
+# 由 pvb-run2.yaml（来自 S2R 505b298 的 s2r-e106-window.yaml）改写，2026-11-26。与 pvb-run2 的唯一区别是第 3 步“数据”：
+#   inputs 第 2 条 = pvb/data/raw/ds004080/derivatives/av_ccep/ → 容器 data/raw/ds004080/derivatives/av_ccep/
+#   inputs 第 3–7 条 = 5 名患者的目录，顺序必须与 PRJ_D5_SUBS 一致 → 容器 data/raw/ds004080/<患者>/
+#   （都是软链接，只读；新结果写到 data/t2/… 和 out/…）
+#
+# ======== 每次运行只改这里（带 ★） ========
+#  workflow.name：pvb-<步骤>
+#  ★1 PRJ_STEP、★2 PRJ_ARGS：同 pvb-run.yaml
+#  ★3 PRJ_D5_SUBS：空格分隔的 5 名患者；★4 inputs 第 3–7 条的 url 与它一一对应（个数不同时日志报 DATA FAIL）
+#  按实测耗时改 exec_timeout；提交前过一遍 docs/02 第 4 节的检查表
+# =================================================
+workflow:
+  name: pvb-p201b-timing-gate
+  resources:
+    default:
+      gpu: 1                  # 要 4 卡：gpu 4 / cpu 64 / memory 256Gi，且同一节点要有 4 张空卡
+      cpu: 16
+      memory: 64Gi
+      storage: 100Gi          # 5 名闸门患者约 34 GiB 的输入 + 输出
+      platform: l20
+  tasks:
+  - name: run
+    image: nvcr.io/nvidia/pytorch:24.10-py3
+    command: ["/bin/bash"]
+    args: ["/tmp/entry.sh"]
+    environment:
+      PRJ_STEP: scripts/p201b_timing.py   # ★1
+      PRJ_ARGS: "--config configs/datasets/p_d5_ds004080.yaml --n-pulses 30"   # ★2
+      PRJ_DATA_IN: data/raw/ds004080   # 只用于日志
+      PRJ_D5_SUBS: "sub-ccepAgeUMCU01 sub-ccepAgeUMCU02 sub-ccepAgeUMCU03 sub-ccepAgeUMCU04 sub-ccepAgeUMCU05"   # ★3
+      HTTP_PROXY: http://172.26.12.11:3128
+      HTTPS_PROXY: http://172.26.12.11:3128
+      NO_PROXY: localhost,127.0.0.1,172.26.11.53,172.26.0.0/16,10.96.0.0/12,10.244.0.0/12,192.168.0.0/16,10.0.0.0/8,.svc,.svc.cluster.local,.cnomnibot.com
+      PIP_CONFIG_FILE: /dev/null
+    files:
+    - path: /tmp/entry.sh
+      contents: |
+        set -u
+        ROOT=/osmo/run/workspace/proj_PVB
+        export PRJ_CODE=$ROOT/pvb PRJ_DATA=$ROOT/data PRJ_OUT=$ROOT/out
+        export PRJ_RUN_ID={{workflow_id}}
+        mkdir -p $PRJ_CODE $PRJ_DATA $PRJ_OUT/logs {{output}}
+        LOG=$PRJ_OUT/logs/$PRJ_RUN_ID.log
+        exec > >(tee -a $LOG) 2>&1
+        echo "===== PVB run $PRJ_RUN_ID  $(date '+%F %T')  host=$(hostname) ====="
+        echo "step=$PRJ_STEP args=$PRJ_ARGS data_in=$PRJ_DATA_IN"
+        ENV_OK=FAIL; CODE_OK=FAIL; DATA_OK=FAIL; RC=-1
+
+        # 1. 环境
+        EXPECT=83d7201844ec4d886b4971c6e7a72ab7c658e642f3ca3cd5a41d196b961eb67f
+        GOT=$(sha256sum {{input:0}}/s2r-venv.tar.gz | cut -d' ' -f1)
+        if [ "$GOT" = "$EXPECT" ]; then
+          mkdir -p /osmo/run/workspace/envs && tar -xzf {{input:0}}/s2r-venv.tar.gz -C /osmo/run/workspace/envs && ENV_OK=OK
+        else
+          echo "venv sha256 不符: $GOT"
+        fi
+        PY=/osmo/run/workspace/envs/s2r/bin/python
+
+        # 2. 代码（复制一份，可写）
+        cp -a {{input:1}}/. $PRJ_CODE/ && [ -f "$PRJ_CODE/$PRJ_STEP" ] && CODE_OK=OK
+        # 提交号：容器里没有 .git（push 时排除），读 push_code.bat 写的 _git_version.txt
+        GV=$PRJ_CODE/_git_version.txt
+        if [ -f "$GV" ]; then
+          PRJ_GIT=$(sed -n 's/^git=\([^ ]*\).*/\1/p' "$GV"); PRJ_GIT_DIRTY=$(sed -n 's/.* dirty=\([0-9]*\).*/\1/p' "$GV")
+        else
+          PRJ_GIT=nogit; PRJ_GIT_DIRTY=-1
+        fi
+        export PRJ_GIT=${PRJ_GIT:-nogit} PRJ_GIT_DIRTY=${PRJ_GIT_DIRTY:--1}
+        echo "code: git=$PRJ_GIT dirty_files=$PRJ_GIT_DIRTY"
+
+        # 3. 数据：按原相对路径放好（目录是真目录，文件是指向输入的软链接，这样新写的文件能和输入区分开）
+        D5=$ROOT/data/raw/ds004080
+        mkdir -p $D5/derivatives/av_ccep && cp -as {{input:2}}/. $D5/derivatives/av_ccep/ && DATA_OK=OK
+        INS=({{input:3}} {{input:4}} {{input:5}} {{input:6}} {{input:7}})
+        SUBS=($PRJ_D5_SUBS)
+        NS=$(echo $PRJ_D5_SUBS | wc -w); NI=$(echo "${INS[@]}" | wc -w)   # 不用 ${井号数组}：Jinja 会把左花括号加井号当注释开头（ref_s2r/10 第 5 节）
+        [ "$NS" -eq "$NI" ] || { echo "PRJ_D5_SUBS 有 $NS 名，inputs 有 $NI 个：不一致"; DATA_OK=FAIL; }
+        for k in "${!SUBS[@]}"; do
+          s=${SUBS[$k]}; mkdir -p $D5/$s && cp -as ${INS[$k]}/. $D5/$s/ || DATA_OK=FAIL
+          echo "data_in $s: $(find -L $D5/$s -type f | wc -l) files, $(du -shL $D5/$s | cut -f1)  <- ${INS[$k]}"
+          [ -n "$(find -L $D5/$s -name '*_ieeg.vhdr' | head -1)" ] || { echo "  $s 没有 vhdr"; DATA_OK=FAIL; }
+        done
+        echo "av_ccep: $(find -L $D5/derivatives/av_ccep -type f | wc -l) files"
+
+        # 4. 运行
+        touch $ROOT/.start_marker; sleep 1
+        if [ "$ENV_OK$CODE_OK$DATA_OK" = "OKOKOK" ]; then
+          cd $PRJ_CODE
+          PYTHONPATH=$PRJ_CODE MPLBACKEND=Agg $PY $PRJ_STEP $PRJ_ARGS
+          RC=$?
+        fi
+
+        # 5. 收集：只把本次新产生或改动过的真实文件，按原相对路径写回（软链接 = 输入，不回传）
+        cd $ROOT
+        {
+          echo "run_id=$PRJ_RUN_ID"; echo "step=$PRJ_STEP $PRJ_ARGS"; echo "data_in=$PRJ_DATA_IN"
+          echo "git=$PRJ_GIT dirty=$PRJ_GIT_DIRTY"; echo "rc=$RC"; echo "finished=$(date '+%F %T')"
+        } > out/logs/$PRJ_RUN_ID.meta.txt
+        echo "--- 回传文件"
+        # 先把完整清单写进文件再显示前几行（11-23 修：原来 `| tee | head` 在 head 退出时连带终止 tee，清单被截断，多出的文件不回传）
+        find data out -type f -newer .start_marker -not -path "*/__pycache__/*" > /tmp/collected.txt 2>/dev/null
+        head -50 /tmp/collected.txt
+        echo "共 $(wc -l < /tmp/collected.txt) 个"
+        cp /tmp/collected.txt out/logs/$PRJ_RUN_ID.collected.txt && echo out/logs/$PRJ_RUN_ID.collected.txt >> /tmp/collected.txt
+        echo "SUMMARY env=$ENV_OK code=$CODE_OK data=$DATA_OK rc=$RC git=$PRJ_GIT"
+        sleep 2
+        xargs -a /tmp/collected.txt -r -d '\n' cp --parents -t {{output}}
+        exit 0
+    inputs:
+    - url: s3://tenant-vww8n20rmcahx6ur-20260904-1fbu/s2r/env/s2r-env-3/
+    - url: s3://tenant-vww8n20rmcahx6ur-20260904-1fbu/pvb/pvb/
+    - url: s3://tenant-vww8n20rmcahx6ur-20260904-1fbu/pvb/data/raw/ds004080/derivatives/av_ccep/
+    - url: s3://tenant-vww8n20rmcahx6ur-20260904-1fbu/pvb/data/raw/ds004080/sub-ccepAgeUMCU01/   # ★4
+    - url: s3://tenant-vww8n20rmcahx6ur-20260904-1fbu/pvb/data/raw/ds004080/sub-ccepAgeUMCU02/   # ★4
+    - url: s3://tenant-vww8n20rmcahx6ur-20260904-1fbu/pvb/data/raw/ds004080/sub-ccepAgeUMCU03/   # ★4
+    - url: s3://tenant-vww8n20rmcahx6ur-20260904-1fbu/pvb/data/raw/ds004080/sub-ccepAgeUMCU04/   # ★4
+    - url: s3://tenant-vww8n20rmcahx6ur-20260904-1fbu/pvb/data/raw/ds004080/sub-ccepAgeUMCU05/   # ★4
+    outputs:
+    - url: s3://tenant-vww8n20rmcahx6ur-20260904-1fbu/pvb/
+  timeout:
+    exec_timeout: 20m

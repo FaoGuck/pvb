@@ -46,9 +46,11 @@ def process_run(events_tsv: str, cfg: dict, root: str, out_dir: str) -> tuple[di
     rd = io_d5.RawReader(meta)
     picks = rd.picks(good)
     chans = [rd.names[i] for i in picks]
-    if abs(rd.sfreq - meta.sfreq) > 1e-6:
+    # vhdr 的 SamplingInterval 有舍入（2048 Hz 的 run 读出来是 2048.0002）；P201 核对过 sample_start = round(onset × json 采样率)，
+    # 所以时间一律用 json 的采样率，只在相差超过万分之一时报错
+    if abs(rd.sfreq / meta.sfreq - 1) > 1e-4:
         raise ValueError(f"采样率不一致：vhdr {rd.sfreq} vs json {meta.sfreq}")
-    sf = rd.sfreq
+    sf = meta.sfreq
     e = cfg["epoch"]
     off = int(round(e["tmin"] * sf))
     n_samp = int(round((e["tmax"] - e["tmin"]) * sf))

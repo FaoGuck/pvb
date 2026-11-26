@@ -13,7 +13,7 @@
              [--subjects sub-ccepAgeUMCU01,sub-ccepAgeUMCU02] [--procs 8]
 输入：$PRJ_DATA/raw/ds004080/<sub>/ses-*/ieeg/*（BrainVision + sidecar）
 输出：$PRJ_DATA/t2/d5/ccep_labels/<sub>/<run_id>_ccep.npz      平均波形与 N1（见 save_npz）
-      $PRJ_DATA/t2/d5/ccep_labels/<sub>_labels.parquet         长表：每行 = run × 刺激对 × 记录电极（含饱和比例 sat_frac_n1win / sat_frac_base）
+      $PRJ_DATA/t2/d5/ccep_labels/<sub>_labels.parquet         长表：每行 = run × 刺激对 × 记录电极（含饱和比例 sat_frac_n1win / sat_frac_base；奇偶两半的 N1 与 N1 窗内最小值 winmin_*，供 P203）
       $PRJ_DATA/t2/d5/ccep_labels/<sub>_stim_saturation.parquet 被刺激电极从饱和恢复的时间（P201b 发现贴在放大器上限）
       $PRJ_OUT/runs/P202_ccep_labels_d5/<时间>_<git7>/          config、env、log、runs.tsv、metrics.csv、report.md、DONE
 """
@@ -97,6 +97,9 @@ def process_run(events_tsv: str, cfg: dict, root: str, out_dir: str) -> tuple[di
         for x in [avg] + halves:
             x[stim_idx] = np.nan                         # mnl：刺激电极本身不评估
         n1 = ccep.detect_n1(avg, tt, cfg["n1"])
+        n1h = [ccep.detect_n1(h, tt, cfg["n1"]) for h in halves]          # P203：奇 / 偶两半各自按同一规则判 N1
+        with np.errstate(all="ignore"):
+            wmin = [np.nanmin(x[:, w_n1], axis=1) for x in [avg] + halves]   # N1 窗内最小值：总有定义（P203 幅度可靠度用）
         tail = ccep.tail_time(avg, tt, sf, cfg["tail"])
         a_s, tts = ccep.to_store(avg, tt, sf, cfg["store"])
         o_s, _ = ccep.to_store(halves[0], tt, sf, cfg["store"])
@@ -110,10 +113,17 @@ def process_run(events_tsv: str, cfg: dict, root: str, out_dir: str) -> tuple[di
                 continue
             rows.append((meta.run_id, meta.subject, pair, ch, trials.shape[0], bool(n1["detected"][c]),
                          n1["latency_s"][c] * 1000, n1["amp_uv"][c], n1["sd_uv"][c], tail[c], dist[c], cur,
-                         float(sat_n1[c]), float(sat_base[c])))
+                         float(sat_n1[c]), float(sat_base[c]),
+                         bool(n1h[0]["detected"][c]), bool(n1h[1]["detected"][c]),
+                         n1h[0]["amp_uv"][c], n1h[1]["amp_uv"][c],
+                         n1h[0]["latency_s"][c] * 1000, n1h[1]["latency_s"][c] * 1000,
+                         float(wmin[0][c]), float(wmin[1][c]), float(wmin[2][c])))
     lab = pd.DataFrame(rows, columns=["run_id", "subject", "stim_pair", "channel", "n_trials", "n1_detected",
                                       "n1_latency_ms", "n1_amp_uv", "base_sd_uv", "tail_s", "dist_mm", "current_ma",
-                                      "sat_frac_n1win", "sat_frac_base"])
+                                      "sat_frac_n1win", "sat_frac_base",
+                                      "n1_detected_odd", "n1_detected_even", "n1_amp_odd_uv", "n1_amp_even_uv",
+                                      "n1_latency_odd_ms", "n1_latency_even_ms",
+                                      "winmin_uv", "winmin_odd_uv", "winmin_even_uv"])
     sat_df = pd.DataFrame(stim_rows, columns=["run_id", "subject", "stim_pair", "stim_electrode", "n_trials",
                                               "recover_med_s", "recover_max_s", "sat_at_epoch_end_frac"])
     od = Path(out_dir) / meta.subject

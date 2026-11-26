@@ -69,6 +69,24 @@ def main(sf: int = 2048):
     sat = pd.read_parquet(os.path.join(data, "t2", "d5", "ccep_labels", f"{sim_d5.SUB}_stim_saturation.parquet"))
     assert len(sat) == 4 and sat.recover_med_s.between(0, 0.003).all(), sat     # 模拟的伪迹 5000 µV 持续 2 ms
     assert {"sat_frac_n1win", "sat_frac_base"} <= set(lab.columns)
+    # 两半：植入的 N1 在两半里都应检出（每半 5 次，噪声 15/√5 µV，远低于门槛）
+    both = lab[lab.n1_detected]
+    assert both.n1_detected_odd.all() and both.n1_detected_even.all(), both
+    assert lab.winmin_odd_uv.notna().all() and lab.winmin_even_uv.notna().all()
+
+    # P204a：模拟的晚成分到 ~0.6 s 结束 → 规则给出 T_tail = 1.0 s
+    run("scripts/p204a_tail.py", env)
+    tt = pd.read_csv(glob.glob(os.path.join(out, "runs", "P204a_d5_tail", "*", "t_tail.tsv"))[0], sep="\t")
+    assert (tt.t_rule_s == 1.0).all(), tt
+    assert glob.glob(os.path.join(out, "runs", "P204a_d5_tail", "*", "figures", "*.png"))
+
+    # P203：只读长表；模拟里两半一致，可靠度应很高
+    r = subprocess.run([sys.executable, "-X", "utf8", "scripts/p203_split_half.py", "--subjects", sim_d5.SUB],
+                       cwd=CODE, env=env, capture_output=True, text=True, encoding="utf-8")
+    print(r.stdout[-2000:]); print(r.stderr[-2000:])
+    assert r.returncode == 0
+    ps = pd.read_csv(glob.glob(os.path.join(out, "runs", "P203_split_half_d5", "*", "per_subject.tsv"))[0], sep="\t").iloc[0]
+    assert ps.rel_sb > 0.5 and ps.det_kappa == 1.0, ps
     print("ALL OK", sf, tmp)
 
 

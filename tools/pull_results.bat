@@ -6,7 +6,7 @@ rem data/raw/ (42 GB) is excluded on purpose.
 rem Big binary intermediates (*.h5 *.npy *.pt) stay in the Bucket by default (external link is ~2-4 MB/s).
 rem   pull_results.bat          -> reports, tables, logs, figures only (fast)
 rem   pull_results.bat full     -> also the big files (S3 alone is ~9 GB, ~1 hour)
-rem   pull_results.bat meta     -> also small sidecars under data/raw/ (*.json *.tsv *.txt CHANGES README*), no signal files
+rem   pull_results.bat meta     -> also small sidecars under data/raw/ (*.json *.tsv *.txt CHANGES README*, av_ccep ccepData_*.mat ~22 MB), no signal files
 rem   data/raw/_manifest/ and data/raw/_logs/ are always pulled (download lists, logs)  [PVB 2026-11-26]
 setlocal
 set "SITE=C:\Users\Admin（无密码）\Desktop/s2r-bucket"
@@ -25,7 +25,7 @@ if not exist "%WINSCP%" (
 set "MASK=| raw/; s2r_ref/; *.h5; *.npy; *.pt; *.filepart"
 if /i "%~1"=="full" set "MASK=| raw/; s2r_ref/; *.filepart"
 set RAWMETA=
-if /i "%~1"=="meta" set RAWMETA="synchronize local -filemask=""*.json; *.tsv; *.txt; CHANGES; README* | *.filepart"" ""%ROOT%\data\raw"" ""%REMOTE%/data/raw"""
+if /i "%~1"=="meta" set RAWMETA="synchronize local -filemask=""*.json; *.tsv; *.txt; CHANGES; README*; ccepData_V1.mat; ccepData_V2.mat; ccepData_init.mat | *.filepart"" ""%ROOT%\data\raw"" ""%REMOTE%/data/raw"""
 if not exist "%ROOT%\data\raw\_manifest" mkdir "%ROOT%\data\raw\_manifest"
 if not exist "%ROOT%\data\raw\_logs" mkdir "%ROOT%\data\raw\_logs"
 if not exist "%ROOT%\out\logs" mkdir "%ROOT%\out\logs"

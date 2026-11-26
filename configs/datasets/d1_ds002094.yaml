@@ -1,0 +1,101 @@
+# 来自 S2R 505b298 的 configs/datasets/d1_ds002094.yaml，2026-11-26 复制（机械改名：S2R_→PRJ_、包名 s2r→项目名）
+# D1 = OpenNeuro ds002094 v1.0.0（单脉冲 TMS-EEG，Hussain & Quentin, Sci Rep 2022）
+# 事实来源：项目文档 03_D1审计结果.md（s2r-s2-audit-2 + sourcedata/README.txt）
+dataset: d1
+raw_dir: raw/ds002094            # 相对 $PRJ_DATA
+pulse_desc: Response/R128        # 脉冲标记；EEG 伪迹峰在标记后 0.8 ms
+tms_tasks: [tmseeg1, tmseeg2]    # tmseeg2 只有 728、766、780，接在 tmseeg1 后面
+rest_task: rest                  # 睁眼静息、无 TMS：只用它判坏导，避免用到任何刺激后的数据
+line_freq: 60                    # 美国数据
+
+eeg:
+  drop_channels: [TP9, TP10]     # 与 Hussain 一致，保留 28 导
+  sfreq_in: 5000
+
+# EEG 与 EMG 对齐（官方 README）：只从 EEG 里删，试验序号按 tmseeg1+tmseeg2 合并后的 1 起计数
+emg_alignment:
+  "767": {drop: [1, 2]}
+  "774": {drop_from: 557}        # 删第 556 个之后的全部
+  "780": {drop: [401, 402, 403, 404, 405]}
+trials_per_block: 100            # EMG 每个 .mat 文件 = 1 个 block = 100 个试验
+
+# ---- S3 切片 ----
+epoch:
+  end_offset_s: 0.01             # 窗口统一截止于脉冲前 10 ms
+  master_window_s: 4.0           # 主片段 W4：脉冲前 4.01 → 0.01 s，其余窗口从它末端截取
+  master_sfreq: 1000             # 主片段只去均值 + 抗混叠降采样，不做其他滤波；各模型从它派生
+  windows_s: [4.0, 3.0, 2.0, 1.0, 0.5]   # W4 W3 W2 W1 W05；主分析窗口待定（建议 W3）
+  guard_s: 0.9                   # 窗口起点必须晚于上一脉冲 + 0.9 s，否则 guard_ok=False（只打标记，不删）
+  clean:                         # 经典特征用的\"干净\"版本：每个窗口单独处理
+    sfreq: 250
+    notch_hz: 60
+    notch_q: 30
+    band_hz: [1.0, 45.0]
+    filter_order: 4              # Butterworth，窗口内对称延拓后零相位（sosfiltfilt）
+    reference: average           # 坏导插值后平均参考
+  bad_channels:                  # 只用 rest 判定
+    flat_uv: 0.5                 # 1–45 Hz 后标准差 < 0.5 µV 视为平
+    robust_z: 4.0                # log(标准差) 的稳健 z 分数绝对值 > 4 视为坏导
+
+# ---- S4 预测目标（MEP） ----
+targets:
+  emg_dir: raw/ds002094/sourcedata/emg   # 相对 $PRJ_DATA；每人 6 个 <id>_00k.mat = 6 个 block
+  muscle: FDI                    # 左手第一骨间背侧肌（另一块 ADM 只做参考）
+  emg_unit_scale: 1000           # .mat 里是 mV → µV
+  mep_window_ms: [20, 40]        # MEP = 这段内峰峰值（总纲 S4，与 Hussain 一致）
+  pre_window_ms: [-25, -5]       # 脉冲前肌电（预激活检查用；文件只给了脉冲前 25 ms）
+  wave_corr_window_ms: [15, 50]  # 单次波形与个人平均波形的相关（Hussain 剔除规则之一）
+  detrend_window: 51             # block 内滑动中位数窗口（试验数），用于去慢漂移
+  emg_n_valid:                   # 官方 README：这些人 EMG 只有前 N 个试验有数据（之后全是 0）
+    "774": 556
+  emg_flat_frac: 0.5             # 自动检查：一个试验里超过一半的采样点恰好为 0 → 无效
+
+# ---- S5 质控（2026-11-21 Yunkai 同意"方案 C"，依据见 docs 05 第 5.1 节） ----
+# 只打标记不删数据；keep_W3 = 主分析，keep_W4 = 敏感性分析
+qc:
+  windows: [W3, W4]
+  pre_pp_max_uv: 50              # 脉冲前 −25→−5 ms FDI 峰峰值 > 50 µV → 预激活，剔除（绝对阈值）
+  mep_mad:                       # MEP 极端值：block 内 |x − 中位数| > k × MAD × scale → 剔除
+    column: mep_resid            # 用去漂移后的残差（block 内趋势已去掉）
+    k: 3.0
+    scale: 1.4826                # 乘 1.4826 使 MAD 在正态下≈标准差；不乘会多删约 3 倍
+  eeg_ptp_max_uv: 150            # clean 窗口里任一判定导联峰峰值 > 150 µV → 剔除
+  eeg_ignore_channels: [FP1, FP2]  # 不参与判定（眨眼/眼动，3 人分析显示超标几乎全在这两导）
+  blink_channels: [FP1, FP2]     # 另存其峰峰值作"眨眼指标"，供 S8 做对照
+  max_bad_frac: 0.2              # S3 判出的坏导（rest）占比 > 20% → 该被试全部试验剔除
+  min_keep: 300                  # 保留数 < 300 → 该窗口标"低数据"
+  flags_only:                    # 只打标记、不剔除（敏感性分析 / 复现 Hussain）
+    hussain_rms_iqr_k: 3.0       # 脉冲前 RMS > Q75 + 3×IQR（被试内）
+    wave_r_min: 0.4              # mep_wave_r < 0.4
+
+# ---- S6 经典特征（2026-11-21） ----
+# 所有特征只用脉冲前窗口内的数据（S3 已保证）；标准化留给 S8 在训练折内做
+features_classical:
+  windows: [W1, W05, W2, W4]     # 总纲：脉冲前最后 1 s，另存 0.5 s 版本；用 S3 的 clean_*（250 Hz，1–45 Hz，平均参考）
+                                 # 11-23 加 W2、W4（E106b：与基础模型同窗口比较）；W1、W05 的列与之前完全相同；mu 相位仍只用最后 1 s
+  bands:                         # Hz，闭区间取 PSD 频点
+    theta: [4, 7]
+    mu: [8, 13]
+    beta: [14, 30]
+    gamma: [30, 45]              # 注意 45 Hz 是 S3 带通上限，30–45 段高端有衰减
+  welch:                         # 两个窗口用同一参数，便于比较；nfft 补零到 1 Hz 网格
+    nperseg: 125                 # 0.5 s
+    noverlap: 62
+    nfft: 250
+    psd_fmax: 45                 # 另存 1–45 Hz 的完整 PSD（npz），E102 复现 Hussain 的频段时可本地重算
+  laplacian:                     # Hjorth 表面拉普拉斯：中心 − 4 个邻居均值（刺激右 M1 → C4）
+    center: C4
+    neighbors: [FC2, FC6, CP2, CP6]
+  aperiodic:                     # 1/f：全脑平均 PSD 的 log10 P ~ log10 f 线性拟合
+    fit_hz: [2, 40]
+    exclude_hz: [[7, 14]]        # 去掉 alpha/mu 峰
+  phase:                         # 脉冲时刻 mu 相位：只用过去样本，自回归前向外推（Zrenner 2018 式）
+    source: master               # 1000 Hz、未滤波；拉普拉斯与参考无关
+    fs: 500                      # 先降到 500 Hz
+    window_s: 1.0                # 用脉冲前最后 1 s
+    band_hz: [8, 13]
+    fir_numtaps: 129             # FIR 带通（窗口内零相位）
+    edge_s: 0.064                # 丢掉窗口末端 64 ms 的滤波边缘
+    ar_order: 30                 # Yule-Walker，按丢边后的数据估计
+    tail_s: 0.064                # 外推到脉冲之后再多 64 ms，使 Hilbert 在脉冲点不处于边缘
+    check_at_s: -1.0             # 自检：假装脉冲在 −1.0 s，用其之前的数据估计，再与用两侧数据算出的"真值"比较

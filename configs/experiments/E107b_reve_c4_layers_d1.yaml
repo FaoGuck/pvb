@@ -1,0 +1,41 @@
+# 来自 S2R 505b298 的 configs/experiments/E107b_reve_c4_layers_d1.yaml，2026-11-26 复制（机械改名：S2R_→PRJ_、包名 s2r→项目名）
+# E107b：REVE × c4 池化（C4 + FC2/FC6/CP2/CP6，时间平均）× 全部层（W4）。补 E107（只做了 meanpool）
+# 层号：0 = 输入嵌入（进入第一个 Transformer 块之前），22 = 末层（= E108 的 reve_c4）；共 23 个预测器
+# 目的：E108 里 REVE c4 末层与经典 W4 无显著差异（−0.002，p=0.41）；看是否有某一层 c4 显著超过经典 → 若有，"不优于经典"的结论要改
+# 计算量：只做 PCA none；约为 E107 的一半（REVE 的 512 维占了 E107 大部分计算）
+# 评估与 E101/E103/E104 完全相同（同试验、同目标、同正则网格、同 1000 次置换）
+# 运行：scripts/s08_probe.py --exp configs/experiments/E107b_reve_c4_layers_d1.yaml
+exp_id: E107b_reve_c4_layers_d1
+dataset: d1
+seed: 0
+
+trials:
+  keep_column: keep_W3          # S5 方案 C 的主分析保留标记
+targets:
+  y_cont:                       # 回归：block 内去漂移后的 ln MEP（S4 的 mep_resid）
+    column: mep_resid
+    task: regression
+  y_bin:                        # 分类：在保留试验上、block 内中位数切分（高 = 1）
+    column: mep_resid
+    task: classification
+    split: block_median
+
+predictors:
+  reve_c4: {type: embedding, dir: reve, window: W4, pool: c4, layers: all}
+
+cv:
+  outer: leave_one_block_out    # 6 折
+  inner: leave_one_block_out    # 训练折内再留一 block 选正则强度
+  standardize: train_fold       # 标准化只在训练折上估计（防泄漏 6.3 第 3 条）
+  pca: [none]                   # 只做不降维（省一半计算量）
+ridge:
+  alphas: {logspace: [-2, 6, 33]}
+  inner_metric: mse
+logistic:
+  lambdas: {logspace: [-1, 4, 11]}    # L2 惩罚 λ（≈ 1/C）；截距不惩罚
+  newton_iters: 25
+  inner_metric: auc
+
+permutation:
+  n: 1000                       # 在 block 内打乱目标，整套嵌套交叉验证重跑（总纲 S9）
+  within: block

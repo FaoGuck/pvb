@@ -1,0 +1,4 @@
+# 来自 S2R 505b298 的 .gitattributes，2026-11-26 复制（机械改名：S2R_→PRJ_、包名 s2r→项目名）
+*.sh   text eol=lf
+*.yaml text eol=lf
+*.bat  text eol=crlf

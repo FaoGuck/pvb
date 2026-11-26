@@ -1,0 +1,56 @@
+# 来自 S2R 505b298 的 configs/experiments/E103_fm_d1.yaml，2026-11-26 复制（机械改名：S2R_→PRJ_、包名 s2r→项目名）
+# E103：D1 基础模型冻结表征（M1–M3，W4，meanpool，末层）（总纲 7.1）；评估与 E101 完全相同（同试验、同目标、同置换）
+# 运行：scripts/s08_probe.py --exp configs/experiments/E103_fm_d1.yaml
+exp_id: E103_fm_d1
+dataset: d1
+seed: 0
+
+trials:
+  keep_column: keep_W3          # S5 方案 C 的主分析保留标记
+targets:
+  y_cont:                       # 回归：block 内去漂移后的 ln MEP（S4 的 mep_resid）
+    column: mep_resid
+    task: regression
+  y_bin:                        # 分类：在保留试验上、block 内中位数切分（高 = 1）
+    column: mep_resid
+    task: classification
+    split: block_median
+
+# 预测器 = 特征集合（列名前缀 / 列名，来自 S6 的 sub-XXX_classical.parquet）
+# 预测器 = S7 表征（data/features/d1/embeddings/<dir>/sub-XXX_W4_meanpool.npy，形状 (n, 层, 维)），取末层
+predictors:
+  reve:
+    type: embedding
+    dir: reve
+    window: W4
+    pool: meanpool
+    layers: [last]              # 第 22 个 block 的输出（512 维）
+  labram:
+    type: embedding
+    dir: labram
+    window: W4
+    pool: meanpool
+    layers: [last]              # 第 12 个 block（200 维）
+  cbramod:
+    type: embedding
+    dir: cbramod
+    window: W4
+    pool: meanpool
+    layers: [last]              # 第 12 层（200 维）
+
+cv:
+  outer: leave_one_block_out    # 6 折
+  inner: leave_one_block_out    # 训练折内再留一 block 选正则强度
+  standardize: train_fold       # 标准化只在训练折上估计（防泄漏 6.3 第 3 条）
+  pca: [none, 50]               # 两种都报告；特征数 ≤ 50 时 pca=50 与 none 相同，跳过
+ridge:
+  alphas: {logspace: [-2, 6, 33]}
+  inner_metric: mse
+logistic:
+  lambdas: {logspace: [-1, 4, 11]}    # L2 惩罚 λ（≈ 1/C）；截距不惩罚
+  newton_iters: 25
+  inner_metric: auc
+
+permutation:
+  n: 1000                       # 在 block 内打乱目标，整套嵌套交叉验证重跑（总纲 S9）
+  within: block

@@ -1,0 +1,16 @@
+# 来自 S2R 505b298 的 configs/models/cbramod.yaml，2026-11-26 复制（机械改名：S2R_→PRJ_、包名 s2r→项目名）
+# M3 CBraMod（依据：docs/02 第 4 节，2026-11-23 核实 GitHub wjq-learning/CBraMod：models/cbramod.py、datasets/*.py、preprocessing/*）
+name: cbramod
+source: {github: wjq-learning/CBraMod, hf_repo: weighting666/CBraMod, weights: pretrained_weights.pth}
+local_dir: cbramod
+preprocess:
+  fs: 200
+  band_hz: [0.3, 75.0]            # TUEG/TUAB/TUEV：0.3–75 Hz
+  filter_order: 4
+  notch_hz: 60                    # 官方 60 Hz
+  reference: average
+  scale: 100                      # datasets/*.py：data/100
+patch: {size: 200, step: 200}
+n_layers: 13                      # patch_embedding 输出 + 12 个 encoder layer
+dim: 200
+# 不用电极名，只看导联顺序；D1 前 19 导与 TUEG 预训练 19 导顺序一致，后 9 导接在后面

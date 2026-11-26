@@ -1,0 +1,56 @@
+# 来自 S2R 505b298 的 configs/experiments/E106b_window_classical_d1.yaml，2026-11-26 复制（机械改名：S2R_→PRJ_、包名 s2r→项目名）
+# E106b：D1 经典特征的窗口扫描（补 E106 的公平性缺口）。经典特征 × W05/W1/W2/W4
+# 目的：E106 里基础模型要 W2/W4 才追平经典 W1；看经典特征用同样长的窗口会不会也变好（若会 → 模型追平只是因为数据更多）
+# 前提：S6 重跑后（11-23 配置加了 W2、W4），classical parquet 里有 *_W2_*、*_W4_* 列；W1、W05 列与之前相同
+# 与 E106 逐被试配对：同试验、同目标、同正则网格、同 1000 次置换（置换由 (seed, 被试号) 决定）；W05、W1 两行与 E106 重复，用来核对
+# 运行：scripts/s08_probe.py --exp configs/experiments/E106b_window_classical_d1.yaml
+exp_id: E106b_window_classical_d1
+dataset: d1
+seed: 0
+
+trials:
+  keep_column: keep_W3          # S5 方案 C 的主分析保留标记（所有窗口用同一批试验，可配对）
+targets:
+  y_cont:                       # 回归：block 内去漂移后的 ln MEP（S4 的 mep_resid）
+    column: mep_resid
+    task: regression
+  y_bin:                        # 分类：在保留试验上、block 内中位数切分（高 = 1）
+    column: mep_resid
+    task: classification
+    split: block_median
+
+# 每个窗口同一组特征（各导联 4 频段功率、C4 拉普拉斯 4 频段、全脑 4 频段、1/f 斜率与截距，共 122 个）+ mu 相位 3 列（只用最后 1 s，与窗口无关）
+predictors:
+  classical_W05:
+    window: W05
+    prefixes: [pow_W05_, loc_W05_, glob_W05_, slope_W05, offset_W05]
+    columns: [mu_sin, mu_cos, mu_amp]
+  classical_W1:
+    window: W1
+    prefixes: [pow_W1_, loc_W1_, glob_W1_, slope_W1, offset_W1]
+    columns: [mu_sin, mu_cos, mu_amp]
+  classical_W2:
+    window: W2
+    prefixes: [pow_W2_, loc_W2_, glob_W2_, slope_W2, offset_W2]
+    columns: [mu_sin, mu_cos, mu_amp]
+  classical_W4:
+    window: W4
+    prefixes: [pow_W4_, loc_W4_, glob_W4_, slope_W4, offset_W4]
+    columns: [mu_sin, mu_cos, mu_amp]
+
+cv:
+  outer: leave_one_block_out    # 6 折
+  inner: leave_one_block_out    # 训练折内再留一 block 选正则强度
+  standardize: train_fold       # 标准化只在训练折上估计（防泄漏 6.3 第 3 条）
+  pca: [none, 50]               # 两种都报告
+ridge:
+  alphas: {logspace: [-2, 6, 33]}
+  inner_metric: mse
+logistic:
+  lambdas: {logspace: [-1, 4, 11]}    # L2 惩罚 λ（≈ 1/C）；截距不惩罚
+  newton_iters: 25
+  inner_metric: auc
+
+permutation:
+  n: 1000                       # 在 block 内打乱目标，整套嵌套交叉验证重跑（总纲 S9）
+  within: block

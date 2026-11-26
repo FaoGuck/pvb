@@ -1,0 +1,65 @@
+# 来自 S2R 505b298 的 configs/experiments/E110_history_d1.yaml，2026-11-26 复制（机械改名：S2R_→PRJ_、包名 s2r→项目名）
+# E110：D1 "上一个 MEP"基线（05 决定 E，Yunkai 11-23 同意）
+# 问题：① 不看脑电、只看反应历史能预测多少；② 脑电（经典特征）在反应历史之外还有没有增量
+# 历史特征只用当前脉冲之前已经发生的试验（防泄漏 6.3）：causal = ln MEP 减去它及之前 24 个试验的中位数（同 block）；
+#   resid = S4 的 mep_resid（去漂移用了以当前试验为中心的 51 试验窗口，含将来的试验 → 只作核对，与 11-23 探索的 0.171 对照）
+# 组合预测器里历史特征不受 L2 惩罚（标准化后放大 100 倍），免得被 125 个脑电特征的惩罚强度压住 → 组合不会比单用历史更差
+# 与 E101–E108 同试验、同目标、同正则网格、同 1000 次置换；经典单独的结果直接用 E106b（同置换，可配对）
+# 运行：scripts/s08_probe.py --exp configs/experiments/E110_history_d1.yaml
+exp_id: E110_history_d1
+dataset: d1
+seed: 0
+
+trials:
+  keep_column: keep_W3
+targets:
+  y_cont:
+    column: mep_resid
+    task: regression
+  y_bin:
+    column: mep_resid
+    task: classification
+    split: block_median
+
+predictors:
+  prev1:                        # 主分析：上一个试验，只用过去
+    type: history
+    kind: causal
+    lags: [1]
+    window: 25
+  prev1_resid:                  # 核对：上一个试验的 mep_resid
+    type: history
+    kind: resid
+    lags: [1]
+  prev3:                        # 前 3 个试验
+    type: history
+    kind: causal
+    lags: [1, 2, 3]
+    window: 25
+  classical_W4_prev1:           # 经典 W4（E106b 最好的脑电预测器）+ 上一个 MEP（不惩罚）
+    window: W4
+    prefixes: [pow_W4_, loc_W4_, glob_W4_, slope_W4, offset_W4]
+    columns: [mu_sin, mu_cos, mu_amp]
+    history: {kind: causal, lags: [1], window: 25}
+  classical_W1_prev1:           # 经典 W1 + 上一个 MEP
+    window: W1
+    prefixes: [pow_W1_, loc_W1_, glob_W1_, slope_W1, offset_W1]
+    columns: [mu_sin, mu_cos, mu_amp]
+    history: {kind: causal, lags: [1], window: 25}
+
+cv:
+  outer: leave_one_block_out
+  inner: leave_one_block_out
+  standardize: train_fold
+  pca: [none]                   # 不降维（不惩罚列不能和 PCA 一起用）
+ridge:
+  alphas: {logspace: [-2, 6, 33]}
+  inner_metric: mse
+logistic:
+  lambdas: {logspace: [-1, 4, 11]}
+  newton_iters: 25
+  inner_metric: auc
+
+permutation:
+  n: 1000
+  within: block

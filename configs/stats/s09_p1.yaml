@@ -1,0 +1,67 @@
+# 来自 S2R 505b298 的 configs/stats/s09_p1.yaml，2026-11-26 复制（机械改名：S2R_→PRJ_、包名 s2r→项目名）
+# S9：P1（D1）组水平统计。scripts/s09_stats.py --cfg configs/stats/s09_p1.yaml
+# 只读 $PRJ_OUT/runs/ 下已有的 metrics.csv / preds.parquet，输出 $PRJ_OUT/summary/
+# 每个实验用哪一次运行写死在这里（可复现；以后重跑了某个实验就改这里）
+runs:
+  E101: E101_classical_d1/20261121-1029_c96f6d3
+  E103: E103_fm_d1/20261123-0524_86c721d
+  E104: E104_random_init_d1/20261123-0525_86c721d
+  E105: E105_eegnet_d1/20261123-0951_6a7af76          # 18/20（767、780 失败未补跑）
+  E106: E106_window_d1/20261123-0647_5881268
+  E106b: E106b_window_classical_d1/20261123-0831_c8bf5b1
+  E107: E107_layers_d1/20261123-0647_5881268
+  E107b: E107b_reve_c4_layers_d1/20261123-1001_03d0871
+  E108: E108_pool_d1/20261123-0932_6c71ff3
+  E110: E110_history_d1/20261123-2114_03d0871
+
+pca: none                     # 全部用不降维（PCA 50 与 none 几乎一样；E107/E108/E110 只做了 none）
+
+# 主表（p1_main.csv）：每个标签 = 一个实验里的一个预测器；layer 不写 = 该预测器只有一层；多个种子自动取平均
+main:
+  classical_W1:      {exp: E106b, predictor: classical_W1}
+  classical_W4:      {exp: E106b, predictor: classical_W4}
+  reve_W1:           {exp: E106,  predictor: reve_W1}
+  reve_W4:           {exp: E106,  predictor: reve_W4}
+  labram_W1:         {exp: E106,  predictor: labram_W1}
+  labram_W4:         {exp: E106,  predictor: labram_W4}
+  cbramod_W1:        {exp: E106,  predictor: cbramod_W1}
+  cbramod_W4:        {exp: E106,  predictor: cbramod_W4}
+  reve_c4_W4:        {exp: E108,  predictor: reve_c4}
+  random_reve_W4:    {exp: E104,  predictor: random_reve}
+  random_labram_W4:  {exp: E104,  predictor: random_labram}
+  random_cbramod_W4: {exp: E104,  predictor: random_cbramod}
+  eegnet_W1:         {exp: E105,  predictor: eegnet_W1}
+  eegnet_W4:         {exp: E105,  predictor: eegnet_W4}
+  prev1:             {exp: E110,  predictor: prev1}
+  classical_W4_prev1: {exp: E110, predictor: classical_W4_prev1}
+
+# 事先计划的配对比较（p1_stats.csv）：a − b 的提升之差，双侧；同一目标内一起做 FDR
+comparisons:
+  - [reve_W1, classical_W1]          # 同窗口：模型 vs 经典
+  - [labram_W1, classical_W1]
+  - [cbramod_W1, classical_W1]
+  - [reve_W4, classical_W4]
+  - [labram_W4, classical_W4]
+  - [cbramod_W4, classical_W4]
+  - [reve_c4_W4, classical_W4]       # REVE 最好的池化
+  - [reve_W4, random_reve_W4]        # 预训练 vs 同结构随机权重
+  - [labram_W4, random_labram_W4]
+  - [cbramod_W4, random_cbramod_W4]
+  - [eegnet_W1, classical_W1]        # 监督 EEGNet vs 经典（18 人）
+  - [eegnet_W4, classical_W4]
+  - [classical_W4, classical_W1]     # 窗口长度对经典
+  - [prev1, classical_W4]            # 反应历史 vs 脑电
+  - [classical_W4_prev1, prev1]      # 脑电在历史之外的增量（拼接组合）
+  - [classical_W4_prev1, classical_W4]
+
+# 偏相关（p1_stats.csv）：控制 history 的样本外预测后，eeg 的样本外预测与 MEP 的偏 Spearman（只做 y_cont），对 0 单侧
+partial:
+  - {eeg: classical_W1, history: prev1}
+  - {eeg: classical_W4, history: prev1}
+
+# 全部配置（p1_all.csv）：这些实验里每个（预测器 × 窗口 × 池化 × 层）对随机、对同窗口经典；同一目标内全部一起 FDR
+all_from: [E104, E105, E106, E106b, E107, E107b, E108, E110]
+classical_ref: {exp: E106b}          # 同窗口经典 = 该实验的 classical_<窗口>
+
+n_boot: 10000
+seed: 0

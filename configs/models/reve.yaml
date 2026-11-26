@@ -1,0 +1,16 @@
+# 来自 S2R 505b298 的 configs/models/reve.yaml，2026-11-26 复制（机械改名：S2R_→PRJ_、包名 s2r→项目名）
+# M1 REVE-base（依据：docs/02 第 4 节，2026-11-23 核实 HF 模型卡 + modeling_reve.py + GitHub elouayas/reve_eeg）
+name: reve
+source: {hf_repo: brain-bzh/reve-base, positions_repo: brain-bzh/reve-positions}
+local_dir: reve                   # 相对 $PRJ_DATA/models
+preprocess:
+  fs: 200
+  band_hz: [0.3, 50.0]            # 官方 BCICIV2a 预处理：Butterworth 0.3–50 Hz（官方 5 阶 lfilter；这里与 S3 一致用窗口内零相位）
+  filter_order: 4
+  notch_hz: 60                    # 官方未做陷波；D1 为美国 60 Hz，50 Hz 低通以上影响很小，保留与 S3 一致
+  reference: average
+  scale: 100                      # µV ÷ 100（官方 LMDB 数据 scale_factor 100）
+patch: {size: 200, step: 180}     # 重叠 20 点；必须让最后一个 patch 对齐窗口末端
+channel_alias: {IZ: Iz}           # 位置库区分大小写，只有 "Iz"
+n_layers: 23                      # 嵌入 + 22 个 block
+dim: 512

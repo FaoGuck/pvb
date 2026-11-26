@@ -1,0 +1,62 @@
+# 来自 S2R 505b298 的 configs/experiments/E102_hussain_d1.yaml，2026-11-26 复制（机械改名：S2R_→PRJ_、包名 s2r→项目名）
+# E102：D1 复现 Hussain & Quentin 2022（Sci Rep 12:6323）的分类流程
+# 运行：scripts/e102_hussain.py --exp configs/experiments/E102_hussain_d1.yaml
+# 论文方法（2026-11-21 读 PMC9012777 全文 Methods）：
+#   EEG 降到 500 Hz、平均参考；脉冲前 0.505–0.005 s；去均值、线性去趋势；Welch 4–100 Hz（0.25 Hz 网格，去 58–62 Hz）；
+#   6 频段 × 28 导 = 168 特征；MEP 剔除 = 脉冲前 EMG RMS > Q75 + 3×IQR 或 wave_r < 0.4；被试内 MEP 中位数切分；
+#   LDA（MVPA-Light，λ = 收缩系数，100 个值线性取 1e-10–1）；训练折内按卡方检验 −log p 排序，逐个加特征 1–168；
+#   分层 5 折，取 168×100 网格里平均 AUC 最高的组合作为该被试结果；500 次置换（整套网格重跑）；> 95% 分位为显著
+#   论文结果：16/20 人显著，AUC 0.62 ± 0.01（0.53–0.72），置换均值（经验机会水平）0.55
+# 与论文不同、只能近似的地方（论文没写或数据限制）：
+#   - 窗口用 0.51–0.01 s：S3 的 master 截止于脉冲前 10 ms（论文 5 ms）
+#   - 降采样在窗口内做（论文对连续数据做；我们按防泄漏规则不碰刺激后数据）
+#   - Welch 分段参数论文未写，按 MATLAB pwelch 默认（8 段、50% 重叠、Hamming）
+#   - 功率是否取对数论文未写，按字面用线性功率（log_power 可切换）
+#   - 卡方检验：论文未写离散化方式，这里把每个特征按训练折分位数分 10 箱，做 10×2 列联表卡方
+exp_id: E102_hussain_d1
+dataset: d1
+seed: 0
+
+trials:                          # 用论文自己的剔除规则（S5 的 flag 列），不用方案 C
+  require: [emg_valid]
+  exclude_flags: [flag_hussain_rms, flag_wave_r]
+label:
+  column: mep_raw_uv
+  split: subject_median          # 高 = 大于被试内中位数
+
+features:
+  source: master                 # S3 的 1000 Hz 未滤波主片段（原参考 POz）
+  window_s: 0.5                  # 取 master 最后 0.5 s
+  fs: 500
+  reference: average
+  detrend: linear
+  welch: {window: hamming, n_segments: 8, overlap: 0.5, df_hz: 0.25}
+  bands:
+    broadband: [4, 100]
+    theta: [4, 7]
+    alpha: [8, 12]
+    beta: [13, 35]
+    low_gamma: [36, 58]
+    high_gamma: [62, 100]
+  exclude_hz: [58, 62]           # 线噪声（美国 60 Hz）
+  log_power: false
+
+lda:
+  lambdas: {linspace: [1.0e-10, 1.0, 100]}
+  max_features: 168
+  rank: chi2
+  chi2_bins: 10
+  zscore: true                   # 训练折内标准化特征（论文未写；不标准化时收缩项会被功率大的特征主导）
+
+variants:                        # 两种交叉验证都跑
+  strat5:                        # 照论文：分层 5 折随机划分；置换 = 全体打乱
+    cv: stratified_kfold
+    k: 5
+    permute_within: none
+  block6:                        # 对照：留一 block（6 折），看 MEP 慢漂移是否让随机折偏高；置换在 block 内
+    cv: leave_one_block_out
+    permute_within: block
+
+permutation:
+  n: 500
+  alpha: 0.05                    # 真实 AUC > 置换分布 95% 分位 → 显著

@@ -1,0 +1,16 @@
+# 来自 S2R 505b298 的 configs/models/labram.yaml，2026-11-26 复制（机械改名：S2R_→PRJ_、包名 s2r→项目名）
+# M2 LaBraM-base（依据：docs/02 第 4 节，2026-11-23 核实 GitHub 935963004/LaBraM：modeling_finetune.py、engine_for_finetuning.py、utils.py）
+name: labram
+source: {github: 935963004/LaBraM, weights: checkpoints/labram-base.pth}
+local_dir: labram
+preprocess:
+  fs: 200
+  band_hz: [0.1, 75.0]            # README：0.1–75 Hz
+  filter_order: 4
+  notch_hz: 60                    # README 为 50 Hz（中国数据）；D1 为 60 Hz
+  reference: average
+  scale: 100                      # engine_for_finetuning.py：samples / 100
+patch: {size: 200, step: 200}
+max_time_patches: 16
+n_layers: 13                      # 嵌入（进入第 1 个 block 之前）+ 12 个 block
+dim: 200

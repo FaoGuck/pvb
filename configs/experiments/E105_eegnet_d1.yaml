@@ -1,0 +1,49 @@
+# 来自 S2R 505b298 的 configs/experiments/E105_eegnet_d1.yaml，2026-11-26 复制（机械改名：S2R_→PRJ_、包名 s2r→项目名）
+# E105：D1 被试内监督上限（总纲 C2：EEGNet-8,2，Lawhern 2018）。纯 torch 实现（s2r/probing/eegnet.py），不装 braindecode
+# 目的：不靠预训练、不靠手工特征，直接用这个人自己的 MEP 训练小网络，能做到多好——给 P2 一个"可学到的上限"参照
+# 与 E101–E108 同试验（keep_W3）、同目标、同外层折（留一 block）；早停用训练折内的一个验证 block（测试 block 的下一个，循环）
+# 窗口 W4、W1：分别对应经典 W4（最好的经典窗口）和经典 W1 / 模型 W1
+# 运行：scripts/e105_eegnet.py --exp configs/experiments/E105_eegnet_d1.yaml
+exp_id: E105_eegnet_d1
+dataset: d1
+seed: 0
+
+trials:
+  keep_column: keep_W3          # S5 方案 C 的主分析保留标记
+targets:
+  y_cont:                       # 回归：block 内去漂移后的 ln MEP（S4 的 mep_resid）；训练集上 z 分数 + MSE
+    column: mep_resid
+    task: regression
+  y_bin:                        # 分类：在保留试验上、block 内中位数切分（高 = 1）；BCE
+    column: mep_resid
+    task: classification
+    split: block_median
+
+# 输入：data/interim/d1/epochs_pre/sub-XXX_pre.h5 的 clean_<window>（250 Hz、1–45 Hz、平均参考、28 导），降到 125 Hz
+predictors:
+  eegnet_W4: {window: W4}
+  eegnet_W1: {window: W1}
+
+eegnet:                         # 原文 within-subject 设置；不在数据上调（没有可用于调参的独立数据，避免事后选择）
+  fs: 125                       # 降采样后的采样率（原文 128 Hz）
+  F1: 8                         # 时间滤波器数
+  D: 2                          # 每个时间滤波器的空间滤波器数
+  F2: 16                        # 可分离卷积的输出通道
+  kern1_s: 0.5                  # 时间卷积核长度约 0.5 s（取奇数 63 点；原文 64 点 @128 Hz）
+  k3: 16                        # 可分离卷积的时间核
+  pool1: 4
+  pool2: 8
+  dropout: 0.5                  # 原文被试内 0.5、跨被试 0.25；这里是被试内且每人只有约 370 个训练试验 → 0.5
+  maxnorm_spatial: 1.0          # 原文的范数约束
+  maxnorm_dense: 0.25
+  lr: 0.001                     # Adam
+  weight_decay: 0.0
+  batch: 64
+  max_epochs: 150
+  patience: 20                  # 验证损失连续 20 个 epoch 不再下降就停（每个模型各自判断）
+  # pack: 101                   # 一次打包训练的模型数（默认 1 + n_perm）；显存不够时用 --pack 调小，结果不变
+
+permutation:
+  n: 100                        # 每次置换都要重新训练网络，算不起 1000 次；p 值分辨率 0.01
+  n_from: 1000                  # 取 S8 同一随机序列（1000 次）的前 100 个 → 与 E101–E108 的前 100 个置换完全相同
+  within: block

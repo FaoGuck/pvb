@@ -1,0 +1,52 @@
+# 来自 S2R 505b298 的 configs/experiments/E108_pool_d1.yaml，2026-11-26 复制（机械改名：S2R_→PRJ_、包名 s2r→项目名）
+# E108：D1 池化方式对比（总纲 7.1）。三个预训练模型 × 三种池化（W4、末层）
+#   meanpool = 所有导联、所有时间 patch 平均（E103–E107 一直用这个）
+#   last1s   = 只取最后一个时间 patch（脉冲前最后 1 s），导联平均——同一个 1 s，但模型看过前面 3 s 的上下文（可与 E106 的 W1 meanpool 比）
+#   c4       = 只取 C4 及其 4 个邻居（FC2、FC6、CP2、CP6），时间平均——对应经典特征的 C4 拉普拉斯局部功率（刺激侧运动区）
+# 目的：meanpool 可能把运动区的局部信息稀释了；若 c4 / last1s 追平经典 W4，G1 的"缺口"就要改写
+# 只做 PCA none（E103/E104/E106 里 PCA 50 与 none 几乎一样）；meanpool 三行与 E106 的 *_W4 重复，用来核对
+# 评估与 E101/E103–E107 完全相同（同试验、同目标、同正则网格、同 1000 次置换）
+# 运行：scripts/s08_probe.py --exp configs/experiments/E108_pool_d1.yaml
+exp_id: E108_pool_d1
+dataset: d1
+seed: 0
+
+trials:
+  keep_column: keep_W3          # S5 方案 C 的主分析保留标记
+targets:
+  y_cont:                       # 回归：block 内去漂移后的 ln MEP（S4 的 mep_resid）
+    column: mep_resid
+    task: regression
+  y_bin:                        # 分类：在保留试验上、block 内中位数切分（高 = 1）
+    column: mep_resid
+    task: classification
+    split: block_median
+
+# data/features/d1/embeddings/<dir>/sub-XXX_W4_<pool>.npy，取末层
+predictors:
+  reve_meanpool:    {type: embedding, dir: reve,    window: W4, pool: meanpool, layers: [last]}
+  reve_last1s:      {type: embedding, dir: reve,    window: W4, pool: last1s,   layers: [last]}
+  reve_c4:          {type: embedding, dir: reve,    window: W4, pool: c4,       layers: [last]}
+  labram_meanpool:  {type: embedding, dir: labram,  window: W4, pool: meanpool, layers: [last]}
+  labram_last1s:    {type: embedding, dir: labram,  window: W4, pool: last1s,   layers: [last]}
+  labram_c4:        {type: embedding, dir: labram,  window: W4, pool: c4,       layers: [last]}
+  cbramod_meanpool: {type: embedding, dir: cbramod, window: W4, pool: meanpool, layers: [last]}
+  cbramod_last1s:   {type: embedding, dir: cbramod, window: W4, pool: last1s,   layers: [last]}
+  cbramod_c4:       {type: embedding, dir: cbramod, window: W4, pool: c4,       layers: [last]}
+
+cv:
+  outer: leave_one_block_out    # 6 折
+  inner: leave_one_block_out    # 训练折内再留一 block 选正则强度
+  standardize: train_fold       # 标准化只在训练折上估计（防泄漏 6.3 第 3 条）
+  pca: [none]                   # 只做不降维
+ridge:
+  alphas: {logspace: [-2, 6, 33]}
+  inner_metric: mse
+logistic:
+  lambdas: {logspace: [-1, 4, 11]}    # L2 惩罚 λ（≈ 1/C）；截距不惩罚
+  newton_iters: 25
+  inner_metric: auc
+
+permutation:
+  n: 1000                       # 在 block 内打乱目标，整套嵌套交叉验证重跑（总纲 S9）
+  within: block

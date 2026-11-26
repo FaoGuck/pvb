@@ -1,0 +1,11 @@
+# 来自 S2R 505b298 的 .gitignore，2026-11-26 复制（机械改名：S2R_→PRJ_、包名 s2r→项目名）
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+.vscode/
+*.log
+.env
+*.key
+*.secret
+.idea/
+_git_version.txt

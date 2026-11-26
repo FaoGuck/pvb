@@ -66,6 +66,9 @@ def main(sf: int = 2048):
     tail = lab[lab.n1_detected].tail_s
     assert tail.between(0.3, 1.0).all(), tail.tolist()                  # 晚成分到约 0.6 s
     assert glob.glob(os.path.join(out, "runs", "P202_ccep_labels_d5", "*", "DONE"))
+    sat = pd.read_parquet(os.path.join(data, "t2", "d5", "ccep_labels", f"{sim_d5.SUB}_stim_saturation.parquet"))
+    assert len(sat) == 4 and sat.recover_med_s.between(0, 0.003).all(), sat     # 模拟的伪迹 5000 µV 持续 2 ms
+    assert {"sat_frac_n1win", "sat_frac_base"} <= set(lab.columns)
     print("ALL OK", sf, tmp)
 
 

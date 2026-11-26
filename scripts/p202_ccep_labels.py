@@ -13,7 +13,8 @@
              [--subjects sub-ccepAgeUMCU01,sub-ccepAgeUMCU02] [--procs 8]
 输入：$PRJ_DATA/raw/ds004080/<sub>/ses-*/ieeg/*（BrainVision + sidecar）
 输出：$PRJ_DATA/t2/d5/ccep_labels/<sub>/<run_id>_ccep.npz      平均波形与 N1（见 save_npz）
-      $PRJ_DATA/t2/d5/ccep_labels/<sub>_labels.parquet         长表：每行 = run × 刺激对 × 记录电极
+      $PRJ_DATA/t2/d5/ccep_labels/<sub>_labels.parquet         长表：每行 = run × 刺激对 × 记录电极（含饱和比例 sat_frac_n1win / sat_frac_base）
+      $PRJ_DATA/t2/d5/ccep_labels/<sub>_stim_saturation.parquet 被刺激电极从饱和恢复的时间（P201b 发现贴在放大器上限）
       $PRJ_OUT/runs/P202_ccep_labels_d5/<时间>_<git7>/          config、env、log、runs.tsv、metrics.csv、report.md、DONE
 """
 from __future__ import annotations
@@ -58,6 +59,12 @@ def process_run(events_tsv: str, cfg: dict, root: str, out_dir: str) -> tuple[di
     el = io_d5.read_electrodes(root, meta.subject)
     xyz = el.reindex(chans)[["x", "y", "z"]].to_numpy(float)
 
+    sat_thr = cfg["n1"]["max_abs_uv"]
+    w_n1 = (tt > cfg["n1"]["tmin"]) & (tt <= cfg["n1"]["tmax"])
+    w_base = (tt > cfg["avg_baseline"]["tmin"]) & (tt < cfg["avg_baseline"]["tmax"])
+    w_post = tt > 0
+    tt_post = tt[w_post]
+    stim_rows = []
     st = meta.stim
     rows, skipped = [], {"few_trials": 0, "stim_el_bad": 0}
     A, O, E, P, NT = [], [], [], [], []
@@ -75,9 +82,18 @@ def process_run(events_tsv: str, cfg: dict, root: str, out_dir: str) -> tuple[di
         if trials.shape[0] < cfg["stim"]["min_trials"]:
             skipped["few_trials"] += 1
             continue
+        stim_idx = [i for i, c in enumerate(chans) if c in (e1, e2)]
+        # 饱和（P201b：被刺激电极从 0 ms 起贴在放大器上限 ±3200 µV，200 ms 后仍未恢复）。用原始试验（未减基线）
+        sat = np.abs(trials) >= sat_thr                                    # (n_trial, n_ch, n_t)
+        sat_n1 = sat[:, :, w_n1].any(axis=2).mean(axis=0)                  # 每通道：N1 窗内有饱和的试验比例
+        sat_base = sat[:, :, w_base].any(axis=2).mean(axis=0)              # 每通道：基线窗内有饱和的试验比例
+        for c in stim_idx:                                                 # 被刺激电极多久恢复
+            s_post = sat[:, c, :][:, w_post]
+            last = np.array([tt_post[np.where(r)[0][-1]] if r.any() else 0.0 for r in s_post])
+            stim_rows.append((meta.run_id, meta.subject, pair, chans[c], trials.shape[0], float(np.median(last)),
+                              float(last.max()), float(s_post[:, -1].mean())))
         avg = ccep.average(trials, tt, cfg)
         halves = [ccep.average(trials[0::2], tt, cfg), ccep.average(trials[1::2], tt, cfg)]
-        stim_idx = [i for i, c in enumerate(chans) if c in (e1, e2)]
         for x in [avg] + halves:
             x[stim_idx] = np.nan                         # mnl：刺激电极本身不评估
         n1 = ccep.detect_n1(avg, tt, cfg["n1"])
@@ -93,9 +109,13 @@ def process_run(events_tsv: str, cfg: dict, root: str, out_dir: str) -> tuple[di
             if c in stim_idx:
                 continue
             rows.append((meta.run_id, meta.subject, pair, ch, trials.shape[0], bool(n1["detected"][c]),
-                         n1["latency_s"][c] * 1000, n1["amp_uv"][c], n1["sd_uv"][c], tail[c], dist[c], cur))
+                         n1["latency_s"][c] * 1000, n1["amp_uv"][c], n1["sd_uv"][c], tail[c], dist[c], cur,
+                         float(sat_n1[c]), float(sat_base[c])))
     lab = pd.DataFrame(rows, columns=["run_id", "subject", "stim_pair", "channel", "n_trials", "n1_detected",
-                                      "n1_latency_ms", "n1_amp_uv", "base_sd_uv", "tail_s", "dist_mm", "current_ma"])
+                                      "n1_latency_ms", "n1_amp_uv", "base_sd_uv", "tail_s", "dist_mm", "current_ma",
+                                      "sat_frac_n1win", "sat_frac_base"])
+    sat_df = pd.DataFrame(stim_rows, columns=["run_id", "subject", "stim_pair", "stim_electrode", "n_trials",
+                                              "recover_med_s", "recover_max_s", "sat_at_epoch_end_frac"])
     od = Path(out_dir) / meta.subject
     od.mkdir(parents=True, exist_ok=True)
     np.savez_compressed(
@@ -110,10 +130,10 @@ def process_run(events_tsv: str, cfg: dict, root: str, out_dir: str) -> tuple[di
                 skip_few_trials=skipped["few_trials"], skip_stim_el_bad=skipped["stim_el_bad"],
                 n_eval=len(lab), n1_rate=float(lab.n1_detected.mean()) if len(lab) else np.nan,
                 seconds=round(time.time() - t0, 1))
-    return summ, lab
+    return summ, lab, sat_df
 
 
-def report(runs_df: pd.DataFrame, lab: pd.DataFrame, cfg: dict) -> tuple[str, pd.DataFrame]:
+def report(runs_df: pd.DataFrame, lab: pd.DataFrame, cfg: dict, sat: pd.DataFrame) -> tuple[str, pd.DataFrame]:
     lab = lab.copy()
     lab["dist_bin"] = pd.cut(lab.dist_mm, DIST_BINS, right=False)
     det = lab[lab.n1_detected]
@@ -137,7 +157,18 @@ def report(runs_df: pd.DataFrame, lab: pd.DataFrame, cfg: dict) -> tuple[str, pd
               "## CCEP 持续时间 → T_tail（P204；只看有 N1 的 刺激对 × 电极）", "",
               f"- tail_s = 整流平均波形（{cfg['tail']['smooth_s']*1000:g} ms 平滑）最后一次超过 {cfg['tail']['sd_mult']:g}×基线 SD 的时刻",
               f"- 全体：中位 {det.tail_s.median():.3f} s，90% {det.tail_s.quantile(0.9):.3f} s，95% {det.tail_s.quantile(0.95):.3f} s，"
-              f"> 1.0 s 的比例 {(det.tail_s > 1.0).mean():.3f}"]
+              f"> 1.0 s 的比例 {(det.tail_s > 1.0).mean():.3f}",
+              "", f"## 饱和（|信号| ≥ {cfg['n1']['max_abs_uv']:g} µV；P201b 发现被刺激电极贴在放大器上限）", ""]
+    if len(sat):
+        lines += [f"- 被刺激电极恢复时间（每个刺激对 × 电极取试验中位数）：中位 {sat.recover_med_s.median():.3f} s，"
+                  f"95% {sat.recover_med_s.quantile(0.95):.3f} s，最大 {sat.recover_max_s.max():.3f} s；"
+                  f"epoch 末（+{cfg['epoch']['tmax']:g} s）仍饱和的比例 {sat.sat_at_epoch_end_frac.mean():.3f}",
+                  "- 按患者：", sat.groupby("subject").agg(recover_med_s=("recover_med_s", "median"),
+                                                         recover_p95_s=("recover_med_s", lambda x: x.quantile(0.95)),
+                                                         still_sat_end=("sat_at_epoch_end_frac", "mean")).round(3).to_string(), ""]
+    lines += [f"- 记录电极：基线窗（{cfg['avg_baseline']['tmin']:g}…{cfg['avg_baseline']['tmax']:g} s）里有饱和试验的 刺激对 × 电极 "
+              f"{(lab.sat_frac_base > 0).mean():.3f}；N1 窗里有饱和试验的 {(lab.sat_frac_n1win > 0).mean():.3f}；"
+              f"其中被判为有 N1 的 {(det.sat_frac_n1win > 0).mean():.3f}"]
     metrics = []
     for _, r in per.iterrows():
         for m in ["n1_rate", "lat_med_ms", "amp_med_uv", "tail_med_s", "tail_p95_s", "tail_gt1s"]:
@@ -163,14 +194,14 @@ def main():
     files = [f for s in subs for f in io_d5.find_runs(root, s)]
     log(f"{EXP_ID}: {len(subs)} 名患者，{len(files)} 个 run；root={root}")
     procs = a.procs or cfg.get("procs", 8)
-    summs, labs = [], []
+    summs, labs, sats = [], [], []
     with ProcessPoolExecutor(max_workers=min(procs, max(1, len(files)))) as ex:
         futs = {ex.submit(process_run, f, cfg, root, out_dir): f for f in files}
         for fu in as_completed(futs):
             f = futs[fu]
             try:
-                s, lab = fu.result()
-                summs.append(s); labs.append(lab)
+                s, lab, sat = fu.result()
+                summs.append(s); labs.append(lab); sats.append(sat)
                 log(f"OK  {s['run_id']}  sfreq={s['sfreq']:g}  ch={s['n_good_ch']}  pairs={s['n_pairs_used']}/{s['n_pairs_all']}"
                     f"  N1={s['n1_rate']:.3f}  {s['seconds']} s")
             except Exception as e:  # 逐 run 容错（S2R 约定）
@@ -179,11 +210,14 @@ def main():
     runs_df = pd.DataFrame(summs).sort_values("run_id")
     runs_df.to_csv(d / "runs.tsv", sep="\t", index=False)
     lab = pd.concat(labs, ignore_index=True) if labs else pd.DataFrame()
+    sat = pd.concat(sats, ignore_index=True) if sats else pd.DataFrame()
     for s, g in lab.groupby("subject"):
         g.to_parquet(Path(out_dir) / f"{s}_labels.parquet", index=False)
+    for s, g in (sat.groupby("subject") if len(sat) else []):
+        g.to_parquet(Path(out_dir) / f"{s}_stim_saturation.parquet", index=False)
     n_ok = int(runs_df.get("error", pd.Series([np.nan] * len(runs_df))).isna().sum())
     if len(lab):
-        rep, met = report(runs_df, lab, cfg)
+        rep, met = report(runs_df, lab, cfg, sat)
         (d / "report.md").write_text(rep, encoding="utf-8")
         met.to_csv(d / "metrics.csv", index=False)
         log(rep)

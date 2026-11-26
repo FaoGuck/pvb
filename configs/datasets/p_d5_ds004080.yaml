@@ -1,0 +1,47 @@
+# P-D5 = OpenNeuro ds004080（CCEP，UMCU，74 名患者，ECoG，SPESclin）。T2 轨道的全部数据参数。
+# N1 检测复现 ds004080 作者的 mnl_ccepAge（scripts/ccep01_averageCCEPsAndDetectN1s.m、functions/ccep_detect_n1peak_ECoG.m、
+# ccep_averageConditions.m；2026-11-26 读源码）。与之不同的地方都在注释里写明。
+dataset: d5_ds004080
+raw_dir: raw/ds004080                 # 相对 $PRJ_DATA
+labels_dir: t2/d5/ccep_labels         # P202 输出，相对 $PRJ_DATA
+
+# G0-T2 闸门患者（00 第 8 节锁定规则：按编号顺序取前 5 名刺激对数 ≥ 20；P001 审计 2026-11-26 选出）
+subjects_gate: [sub-ccepAgeUMCU01, sub-ccepAgeUMCU02, sub-ccepAgeUMCU03, sub-ccepAgeUMCU04, sub-ccepAgeUMCU05]
+
+channels:
+  types: [ECOG]                       # mnl_ccepAge 只用 ECOG 且 status == good
+  status_good: good
+
+stim:
+  merge_polarity: true                # mnl：mergePlusMin = 1（F01-F02 与 F02-F01 合并）
+  merge_current: true                 # mnl：mergeAmp = 1
+  min_trials: 5                       # mnl：少于 5 次的刺激对丢弃
+  drop_pair_if_stim_el_bad: true      # mnl：任一刺激电极不是 good → 该对全部 NaN
+
+epoch:                                # mnl：epoch_length 5 s，prestim 2 s
+  tmin: -2.0
+  tmax: 3.0
+trial_baseline: {tmin: -1.0, tmax: -0.1, stat: median}   # mnl：每个试验减去 (-1, -0.1) s 的中位数
+avg_baseline:   {tmin: -2.0, tmax: -0.1, stat: median}   # mnl：平均后再减 (-2, -0.1) s 的中位数
+
+n1:
+  tmin: 0.009                         # mnl：find(tt > 0.009, 1)
+  tmax: 0.100                         # mnl：n1_peak_range = 100 ms
+  search_tmax: 0.5                    # mnl：peakfinder 在 9 ms–0.5 s 上找峰，再取 ≤ tmax 的
+  peak_prominence_uv: 20              # mnl：ccep_peakfinder(sel = 20)；这里用 scipy find_peaks 的 prominence 近似
+  sd_baseline: [-2.0, -0.1]           # mnl：平均波形在 (-2, -0.1) s 的标准差
+  sd_floor_uv: 50                     # mnl：SD < 50 µV 时取 50
+  thresh_sd: 3.4                      # mnl：amplitude_thresh = 3.4（有效最小幅度 170 µV）
+  max_abs_uv: 3000                    # mnl：|幅度| > 3000 µV 视为饱和，丢弃
+
+store:                                # 存平均波形（全部 / 奇数次 / 偶数次），供 P203 split-half 和 T_tail
+  tmin: -0.2
+  tmax: 1.0
+  sfreq: 512                          # 2048 Hz 的 run 先抗混叠降到 512 Hz 再存；N1 检测在原采样率上做
+
+tail:                                 # CCEP 晚成分持续多久 → 决定 P204 的 T_tail（00 第 4 节 P204）
+  smooth_s: 0.05                      # 整流后滑动平均窗
+  sd_mult: 3.0                        # 超过平均波形基线 SD 的倍数算“还没回到基线”
+  tmax: 3.0                           # 只看到 epoch 末尾
+
+procs: 8                              # 按 run 并行的进程数

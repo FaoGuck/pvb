@@ -8,12 +8,14 @@
 “可用折”：测试折 f 的单位 → 除 f 外的折；训练单位（在折 g）→ 除 f、g 外的折。于是任何单位的特征都不含
 它自己刺激对的标签或观测段，且训练与测试的特征按同一方式构造。
 预测头：标准化 + L2 逻辑回归；C 由训练折上的留一折（按折分组）内层 CV 选（AUROC）。
+P205b（task="reg"）：目标改为连续值（响应电极的幅度），预测头 = 标准化 + 岭回归，α 由同样的内层 CV 按 Spearman 选。
 """
 from __future__ import annotations
 
 import numpy as np
 import pandas as pd
-from sklearn.linear_model import LogisticRegression
+from scipy.stats import spearmanr
+from sklearn.linear_model import LogisticRegression, Ridge
 from sklearn.metrics import roc_auc_score
 from sklearn.preprocessing import StandardScaler
 
@@ -96,15 +98,26 @@ def build_features(units: pd.DataFrame, fold_of_pair: dict, pool: ObsPool | None
     return feats
 
 
-def _fit_predict(Xtr, ytr, Xte, C):
+def _fit_predict(Xtr, ytr, Xte, C, task: str = "clf"):
+    """task = clf：C 是逻辑回归的 C；task = reg：C 是岭回归的 α。"""
     med = np.nanmedian(Xtr, axis=0)
     med = np.where(np.isfinite(med), med, 0.0)
     Xtr = np.where(np.isfinite(Xtr), Xtr, med); Xte = np.where(np.isfinite(Xte), Xte, med)
-    if len(np.unique(ytr)) < 2:                        # 训练集只有一类：给常数预测
+    if len(np.unique(ytr)) < 2:                        # 训练集只有一类 / 一个值：给常数预测
         return np.full(len(Xte), float(np.mean(ytr)))
     sc = StandardScaler().fit(Xtr)
+    if task == "reg":
+        return Ridge(alpha=C).fit(sc.transform(Xtr), ytr).predict(sc.transform(Xte))
     m = LogisticRegression(C=C, max_iter=2000).fit(sc.transform(Xtr), ytr)
     return m.predict_proba(sc.transform(Xte))[:, 1]
+
+
+def safe_spearman(y, s) -> float:
+    y, s = np.asarray(y, float), np.asarray(s, float)
+    ok = np.isfinite(y) & np.isfinite(s)
+    if ok.sum() < 3 or np.ptp(y[ok]) == 0 or np.ptp(s[ok]) == 0:
+        return float("nan")
+    return float(spearmanr(y[ok], s[ok])[0])
 
 
 def safe_auc(y, s) -> float:
@@ -113,10 +126,16 @@ def safe_auc(y, s) -> float:
 
 
 def cv_predict(units: pd.DataFrame, fold_of_pair: dict, pool: ObsPool | None, sets: list[str], cfg_b: dict,
-               fixed_C: dict | None = None, b2_pair_map: dict | None = None) -> tuple[dict, dict]:
-    """外层 K 折（按刺激对的折）。返回 {set: 每个单位的预测分数}、{(set, fold): 选中的 C}。"""
+               fixed_C: dict | None = None, b2_pair_map: dict | None = None, target: str = "n1_detected",
+               task: str = "clf", source: pd.DataFrame | None = None) -> tuple[dict, dict]:
+    """外层 K 折（按刺激对的折）。返回 {set: 每个单位的预测分数}、{(set, fold): 选中的 C（或 α）}。
+    task = clf（P205，目标 N1 有无，按 AUROC 选 C，网格 cfg_b["C_grid"]）/ reg（P205b，连续目标，按 Spearman 选 α，
+    网格 cfg_b["alpha_grid"]）。source = B1 的标签来源（默认 units 本身；P205b 传 P205 的全部评估单位）。"""
     fold = units.stim_pair.map(fold_of_pair).to_numpy()
-    y = units.n1_detected.to_numpy(bool)
+    reg = task == "reg"
+    y = units[target].to_numpy(float if reg else bool)
+    src = units if source is None else source
+    grid = cfg_b["alpha_grid"] if reg else cfg_b["C_grid"]
     K = int(np.nanmax(fold)) + 1
     pred = {s: np.full(len(units), np.nan) for s in sets}
     chosen = {}
@@ -124,12 +143,12 @@ def cv_predict(units: pd.DataFrame, fold_of_pair: dict, pool: ObsPool | None, se
         te = fold == f
         if not te.any():
             continue
-        Fte = build_features(units[te], fold_of_pair, pool, {f}, b2_pair_map, source=units)
+        Fte = build_features(units[te], fold_of_pair, pool, {f}, b2_pair_map, source=src)
         tr_parts = {}
         for g in range(K):
             if g == f or not (fold == g).any():
                 continue
-            tr_parts[g] = build_features(units[fold == g], fold_of_pair, pool, {f, g}, b2_pair_map, source=units)
+            tr_parts[g] = build_features(units[fold == g], fold_of_pair, pool, {f, g}, b2_pair_map, source=src)
         gs = sorted(tr_parts)
         ytr = np.concatenate([y[fold == g] for g in gs])
         gtr = np.concatenate([np.full((fold == g).sum(), g) for g in gs])
@@ -140,16 +159,19 @@ def cv_predict(units: pd.DataFrame, fold_of_pair: dict, pool: ObsPool | None, se
             if fixed_C is not None:
                 C = fixed_C[(s, f)]
             else:
-                best, C = -1.0, cfg_b["C_grid"][0]
-                for c in cfg_b["C_grid"]:
+                best, C = -np.inf, grid[0]
+                for c in grid:
                     sc = []
                     for h in gs:                                   # 内层：在训练折上留一折
                         tr_h, va_h = gtr != h, gtr == h
-                        if 0 < ytr[va_h].sum() < va_h.sum() and 0 < ytr[tr_h].sum() < tr_h.sum():
+                        if reg:
+                            if va_h.sum() >= 3 and tr_h.sum() >= 3:
+                                sc.append(safe_spearman(ytr[va_h], _fit_predict(Xtr[tr_h], ytr[tr_h], Xtr[va_h], c, task)))
+                        elif 0 < ytr[va_h].sum() < va_h.sum() and 0 < ytr[tr_h].sum() < tr_h.sum():
                             sc.append(safe_auc(ytr[va_h], _fit_predict(Xtr[tr_h], ytr[tr_h], Xtr[va_h], c)))
-                    v = np.nanmean(sc) if sc else -1.0
+                    v = np.nanmean(sc) if np.isfinite(sc).any() else -np.inf
                     if v > best:
                         best, C = v, c
             chosen[(s, f)] = C
-            pred[s][te] = _fit_predict(Xtr, ytr, Xte, C)
+            pred[s][te] = _fit_predict(Xtr, ytr, Xte, C, task)
     return pred, chosen

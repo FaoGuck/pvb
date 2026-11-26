@@ -74,7 +74,8 @@ workflow:
         mkdir -p $D5/derivatives/av_ccep && cp -as {{input:2}}/. $D5/derivatives/av_ccep/ && DATA_OK=OK
         INS=({{input:3}} {{input:4}} {{input:5}} {{input:6}} {{input:7}})
         SUBS=($PRJ_D5_SUBS)
-        [ ${#SUBS[@]} -eq ${#INS[@]} ] || { echo "PRJ_D5_SUBS 有 ${#SUBS[@]} 名，inputs 有 ${#INS[@]} 个：不一致"; DATA_OK=FAIL; }
+        NS=$(echo $PRJ_D5_SUBS | wc -w); NI=$(echo "${INS[@]}" | wc -w)   # 不用 ${井号数组}：Jinja 会把左花括号加井号当注释开头（ref_s2r/10 第 5 节）
+        [ "$NS" -eq "$NI" ] || { echo "PRJ_D5_SUBS 有 $NS 名，inputs 有 $NI 个：不一致"; DATA_OK=FAIL; }
         for k in "${!SUBS[@]}"; do
           s=${SUBS[$k]}; mkdir -p $D5/$s && cp -as ${INS[$k]}/. $D5/$s/ || DATA_OK=FAIL
           echo "data_in $s: $(find -L $D5/$s -type f | wc -l) files, $(du -shL $D5/$s | cut -f1)  <- ${INS[$k]}"

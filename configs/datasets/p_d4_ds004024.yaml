@@ -1,0 +1,37 @@
+# P-D4 = OpenNeuro ds004024（Chicago ccPAS，13 人，单脉冲 TMS-EEG + 双侧 FDI 肌电，20 kHz，CC0）。T1 轨道第二数据集。
+# 事实来源：01 V5c / V5d（2026-11-26 清单、2026-11-27 元数据审计 out/summary/p110_d4_meta_audit.md）
+# 原始数据不存（共享规则第 5 条）：P110 / P111 在容器里逐 run 下载 → 处理 → 删除
+dataset: d4_ds004024
+source: s3://openneuro.org/ds004024
+manifest: raw/_manifest/ds004024.keys.tsv     # 相对 $PRJ_DATA
+line_freq: 60                                 # 美国数据
+pulse_types: [Stimulus/A, SB/A]               # value 都是 3；CON008 的 30 个 run 用 SB/A（元数据审计）
+emg_channels: {right: EMG Right, left: EMG Left}   # 右侧 FDI ← 左 M1；左侧 FDI ← 右 M1
+eeg:
+  drop_channels: [TP9, TP10]                  # 与 D1 相同（D1 也去掉 TP9 / TP10）；D4 参考在右乳突
+intensity_rmt: {"01": 100, "02": 100, "03": 100, "04": 100, "05": 100, "06": 100,
+                "07": 110, "08": 110, "09": 110, "10": 110, "11": 110, "12": 110}   # dataset_description.json
+
+# ---- P110 第 3 步：MEP 审计（2026-11-27 写死，00 第 14 节；运行前不看信号） ----
+p110:
+  session_order: [async4ms, async9ms, async14ms]   # 每人取第一个有的会话
+  runs: ["01", "02"]                               # 都是 100% rMT
+  side_window_ms: [20, 40]       # 两导 EMG 在这段的峰峰值中位数较大的一导 = 目标肌
+  mep_window_ms: [20, 40]        # 与 D1 targets.mep_window_ms 相同
+  pre_window_ms: [-25, -5]       # 与 D1 相同：预激活检查
+  noise_window_ms: [-60, -40]    # 噪声底（同长 20 ms）
+  presence_uv: 50                # MEP 出现率的阈值（只报告，不作剔除）
+  wave_ms: [-20, 80]             # 平均 EMG 波形图的范围
+  epoch:                         # 与 D1 epoch 相同，只取 W3 做 EEG 质控
+    end_offset_s: 0.01
+    window_s: 3.0
+    master_sfreq: 1000
+    guard_s: 0.9
+    clean: {sfreq: 250, notch_hz: 60, notch_q: 30, band_hz: [1.0, 45.0], filter_order: 4, reference: average}
+  qc:                            # 与 D1 qc 相同
+    pre_pp_max_uv: 50
+    mep_mad: {k: 3.0, scale: 1.4826}
+    detrend_window: 51
+    eeg_ptp_max_uv: 150
+    eeg_ignore_channels: [Fp1, Fp2]
+  g0_t1_2: {min_trials: 200, min_subjects: 10}     # 00 第 8 节（锁定）

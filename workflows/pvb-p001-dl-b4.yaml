@@ -190,4 +190,4 @@ workflow:
     outputs:
     - url: s3://tenant-vww8n20rmcahx6ur-20260904-1fbu/pvb/data/raw/
   timeout:
-    exec_timeout: 50m       # ★5 18.9 GiB ÷ 0.011 × 1.5 + SHA256
+    exec_timeout: 120m       # ★5 18.9 GiB ÷ 0.011 × 1.5 + SHA256 ≈ 50m；与 b3 同时下载可能分带宽，放宽到 120m（超时只是上限，按实际用时计费）

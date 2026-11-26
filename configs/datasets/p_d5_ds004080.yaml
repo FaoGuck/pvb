@@ -45,3 +45,32 @@ tail:                                 # CCEP 晚成分持续多久 → 决定 P2
   tmax: 3.0                           # 只看到 epoch 末尾
 
 procs: 8                              # 按 run 并行的进程数
+
+# ---- P204 观测段 / P205 基线（2026-11-26 写死，运行前；00 第 5.2、6 节）----
+observation:                          # P204
+  t_tail: 2.0                         # s，P204a 规则给出（00 第 14 节）
+  pre_gap: 0.010                      # s，观测段在下一个脉冲前 10 ms 结束
+  min_len: 1.0                        # s，短于此丢弃
+  sfreq: 512                          # 先抗混叠降采样再算连接度
+  mask_owner_stim: true               # 屏蔽上一个脉冲的刺激电极（P202 / P204a：+4 s 仍 ≈ 100 % 饱和）
+  mask_next_stim: true                # 屏蔽下一个脉冲的刺激电极（P201b：有的 run 在脉冲前数十 ms 就已变平）
+  sat_uv: 3000                        # 段内任一样本 |x| ≥ 此值的通道，本段屏蔽
+  bands:                              # 相干（由池化的互谱计算）与包络相关
+    delta: [1, 4]
+    theta: [4, 8]
+    alpha: [8, 13]
+    beta: [13, 30]
+    gamma: [30, 70]
+    hgamma: [70, 150]
+  envelope_bands: [beta, hgamma]      # 带通 → Hilbert 包络 → 段内 Pearson 相关
+
+folds:                                # 00 第 5.2 节
+  k: 5
+  seed: 0                             # 共用电极的刺激对连成一组，按组贪心分折（各折刺激对数尽量平均）
+  adjacent_factor: 1.5                # 记录电极到任一刺激电极的距离 ≤ 1.5 × 该患者电极最近邻距离中位数 → 不评估
+
+baselines:                            # P205
+  C_grid: [0.01, 0.1, 1.0, 10.0]      # L2 逻辑回归，内层按组 CV 选 C（按 AUROC）
+  inner_k: 4
+  n_perm: 100                         # B2 增量的置换零分布：在患者内随机打乱 刺激对 → B2 特征 的对应
+  perm_seed: 0

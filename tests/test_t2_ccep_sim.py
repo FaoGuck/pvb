@@ -80,6 +80,13 @@ def main(sf: int = 2048):
     assert (tt.t_rule_s == 1.0).all(), tt
     assert glob.glob(os.path.join(out, "runs", "P204a_d5_tail", "*", "figures", "*.png"))
 
+    # P204：观测段 + owner 累加量（2 个可用刺激对 + 1 个少于 5 次的对，都应有 owner）
+    run("scripts/p204_observation.py", env)
+    o = np.load(glob.glob(os.path.join(data, "t2", "d5", "observation", sim_d5.SUB, "*_obs.npz"))[0])
+    assert set(o["owners"]) == {"PT01-PT02", "PT04-PT05", "PT07-PT08"}, o["owners"]
+    assert o["n_segments"].min() > 0 and o["sums"].shape[1] == 9
+    assert os.path.isfile(os.path.join(data, "t2", "d5", "observation", f"{sim_d5.SUB}_electrodes.parquet"))
+
     # P203：只读长表；模拟里两半一致，可靠度应很高
     r = subprocess.run([sys.executable, "-X", "utf8", "scripts/p203_split_half.py", "--subjects", sim_d5.SUB],
                        cwd=CODE, env=env, capture_output=True, text=True, encoding="utf-8")

@@ -121,7 +121,9 @@ workflow:
         INC=()
         if [ -n "${DL_INCLUDE:-}" ]; then
           INC+=(--exclude "*")
+          set -f   # 关掉通配符展开：否则 README* 等会被 bash 按容器当前目录展开（11-26 pvb-p001-dl-meta-1 因此漏下 README）
           for pt in $DL_INCLUDE; do INC+=(--include "$pt"); done
+          set +f
         fi
         # 本批预计大小（用于进度显示）
         EXP_GB=$($ENV/bin/python - "$KEYS" "${DL_INCLUDE:-}" <<'PY' 2>/dev/null || echo "?"

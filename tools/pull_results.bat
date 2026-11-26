@@ -6,6 +6,8 @@ rem data/raw/ (42 GB) is excluded on purpose.
 rem Big binary intermediates (*.h5 *.npy *.pt) stay in the Bucket by default (external link is ~2-4 MB/s).
 rem   pull_results.bat          -> reports, tables, logs, figures only (fast)
 rem   pull_results.bat full     -> also the big files (S3 alone is ~9 GB, ~1 hour)
+rem   pull_results.bat meta     -> also small sidecars under data/raw/ (*.json *.tsv *.txt CHANGES README*), no signal files
+rem   data/raw/_manifest/ and data/raw/_logs/ are always pulled (download lists, logs)  [PVB 2026-11-26]
 setlocal
 set "SITE=C:\Users\Admin（无密码）\Desktop/s2r-bucket"
 set "REMOTE=/tenant-vww8n20rmcahx6ur-20260904-1fbu/pvb"
@@ -22,6 +24,10 @@ if not exist "%WINSCP%" (
 )
 set "MASK=| raw/; s2r_ref/; *.h5; *.npy; *.pt; *.filepart"
 if /i "%~1"=="full" set "MASK=| raw/; s2r_ref/; *.filepart"
+set RAWMETA=
+if /i "%~1"=="meta" set RAWMETA="synchronize local -filemask=""*.json; *.tsv; *.txt; CHANGES; README* | *.filepart"" ""%ROOT%\data\raw"" ""%REMOTE%/data/raw"""
+if not exist "%ROOT%\data\raw\_manifest" mkdir "%ROOT%\data\raw\_manifest"
+if not exist "%ROOT%\data\raw\_logs" mkdir "%ROOT%\data\raw\_logs"
 if not exist "%ROOT%\out\logs" mkdir "%ROOT%\out\logs"
 if not exist "%ROOT%\data" mkdir "%ROOT%\data"
 
@@ -38,6 +44,9 @@ if exist "%ROOT%\out\logs\winscp_pull.log" del "%ROOT%\out\logs\winscp_pull.log"
   "mkdir ""%REMOTE%/out""" ^
   "synchronize local -filemask=""%MASK%"" ""%ROOT%\data"" ""%REMOTE%/data""" ^
   "synchronize local -filemask=""%MASK%"" ""%ROOT%\out"" ""%REMOTE%/out""" ^
+  "synchronize local ""%ROOT%\data\raw\_manifest"" ""%REMOTE%/data/raw/_manifest""" ^
+  "synchronize local ""%ROOT%\data\raw\_logs"" ""%REMOTE%/data/raw/_logs""" ^
+  %RAWMETA% ^
   "exit"
 set "RC=%ERRORLEVEL%"
 echo.

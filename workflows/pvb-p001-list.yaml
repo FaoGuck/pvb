@@ -1,0 +1,137 @@
+# P001（V4b/V4c）：ds004080 只列清单。由 pvb-download-list.yaml 复制，只改了 name（2026-11-26）
+# pvb-download-list：只列清单、不下载数据。两种用法：
+#   ① DL_SOURCE 是 s3://…（如 OpenNeuro）：列出全部对象 → data/raw/_manifest/<DL_NAME>.keys.tsv（相对路径 \t 字节数）
+#      + <DL_NAME>.summary.txt（总文件数、总大小、按一级目录 / 被试汇总的大小、最大的 20 个文件）
+#   ② DL_SOURCE 是 http(s)://…（如 KU Leuven RDR、NEMAR、OSF）：只测连通性和速度（HEAD + 下载 60 秒）→ <DL_NAME>.probe.txt
+# 来自 S2R 505b298 时期实测通过的 s2r-s1-download.yaml（11-19 s2r-s1-download-1：466 个文件 VERIFY_OK）与 s2r-env-3 的测速段，
+# 2026-11-26 改写为通用模板；**第一次使用前它还没在平台上跑过**，先用一个小数据集试（例如 ds004080 的清单）
+#
+# ======== 每次只改这里（带 ★） ========
+#  workflow.name：pvb-<编号>-list，例如 pvb-p001-list（必须以 pvb- 开头）
+#  ★1 DL_NAME：数据集代号，用作文件名，例如 ds004080
+#  ★2 DL_SOURCE：s3://openneuro.org/ds004080   或   https://…（只测速）
+#  结果回传到 s3://<桶>/pvb/data/raw/_manifest/ 和 _logs/；拉回本地后在 data\raw\_manifest\ 里看
+# =================================================
+workflow:
+  name: pvb-p001-list
+  resources:
+    default:
+      gpu: 1                 # 只为了落在缓存了镜像的 L20 节点上（ref_s2r/10 第 8 节）；任务本身几乎不用 GPU
+      cpu: 16
+      memory: 64Gi
+      storage: 20Gi
+      platform: l20
+  tasks:
+  - name: list
+    image: nvcr.io/nvidia/pytorch:24.10-py3
+    command: ["/bin/bash"]
+    args: ["/tmp/entry.sh"]
+    environment:
+      DL_NAME: ds004080                          # ★1
+      DL_SOURCE: s3://openneuro.org/ds004080     # ★2
+      HTTP_PROXY: http://172.26.12.11:3128
+      HTTPS_PROXY: http://172.26.12.11:3128
+      http_proxy: http://172.26.12.11:3128
+      https_proxy: http://172.26.12.11:3128
+      NO_PROXY: localhost,127.0.0.1,172.26.11.53,172.26.0.0/16,10.96.0.0/12,10.244.0.0/12,192.168.0.0/16,10.0.0.0/8,.svc,.svc.cluster.local,.cnomnibot.com
+      no_proxy: localhost,127.0.0.1,172.26.11.53,172.26.0.0/16,10.96.0.0/12,10.244.0.0/12,192.168.0.0/16,10.0.0.0/8,.svc,.svc.cluster.local,.cnomnibot.com
+      PIP_CONFIG_FILE: /dev/null
+      AWS_DEFAULT_REGION: us-east-1
+    inputs:
+    # 0：S2R 的环境包（含 awscli），只读
+    - url: s3://tenant-vww8n20rmcahx6ur-20260904-1fbu/s2r/env/s2r-env-3/
+    files:
+    - path: /tmp/summarize.py
+      contents: |
+        # 用法：python summarize.py <aws s3 ls --recursive 的输出> <前缀> <keys.tsv> <summary.txt>
+        import sys, collections
+        ls_txt, prefix, keys_tsv, summ = sys.argv[1:5]
+        rows = []
+        for line in open(ls_txt, encoding="utf-8", errors="replace"):
+            parts = line.rstrip("\n").split(None, 3)
+            if len(parts) < 4 or not parts[2].isdigit():
+                continue
+            key = parts[3]
+            if key.endswith("/"):
+                continue
+            rel = key[len(prefix):] if key.startswith(prefix) else key
+            rows.append((rel, int(parts[2])))
+        rows.sort()
+        with open(keys_tsv, "w", encoding="utf-8") as f:
+            for rel, size in rows:
+                f.write(f"{rel}\t{size}\n")
+        tot = sum(s for _, s in rows)
+        top = collections.defaultdict(lambda: [0, 0])
+        for rel, size in rows:
+            k = rel.split("/")[0] if "/" in rel else "(根目录文件)"
+            top[k][0] += 1; top[k][1] += size
+        with open(summ, "w", encoding="utf-8") as f:
+            f.write(f"files: {len(rows)}\nbytes: {tot}\nGiB: {tot/2**30:.2f}\n\n# 一级目录 / 被试：文件数  GiB\n")
+            for k in sorted(top):
+                f.write(f"{k}\t{top[k][0]}\t{top[k][1]/2**30:.3f}\n")
+            f.write("\n# 最大的 20 个文件（GiB）\n")
+            for rel, size in sorted(rows, key=lambda x: -x[1])[:20]:
+                f.write(f"{size/2**30:.3f}\t{rel}\n")
+        print(f"LIST {len(rows)} 个文件，{tot/2**30:.2f} GiB，一级目录 {len(top)} 个")
+        if not rows:
+            sys.exit(1)
+    - path: /tmp/entry.sh
+      contents: |
+        set -u
+        OUT={{output}}
+        IN0={{input:0}}
+        MAN=$OUT/_manifest
+        LOG=$OUT/_logs
+        mkdir -p $MAN $LOG
+        exec > >(tee -a $LOG/${DL_NAME}_list.log) 2>&1
+        T0=$(date +%s)
+        ts() { echo "[$(date -u +%H:%M:%S) +$(( ($(date +%s) - T0) / 60 ))min] $*"; }
+        ENVS=/osmo/run/workspace/envs
+        ENV=$ENVS/s2r
+        S_ENV=FAIL; S_LIST=FAIL; S_PROBE=SKIP
+        ts "===== PVB download-list  name=$DL_NAME  source=$DL_SOURCE ====="
+
+        ts "===== 0. 恢复 s2r-env-3 环境（只为 awscli）====="
+        EXPECT=83d7201844ec4d886b4971c6e7a72ab7c658e642f3ca3cd5a41d196b961eb67f
+        GOT=$(sha256sum $IN0/s2r-venv.tar.gz | cut -d' ' -f1)
+        if [ "$GOT" = "$EXPECT" ]; then
+          mkdir -p $ENVS && tar -xzf $IN0/s2r-venv.tar.gz -C $ENVS && $ENV/bin/aws --version && S_ENV=OK
+        else
+          echo "venv sha256 不符: $GOT"
+        fi
+        AWS=$ENV/bin/aws
+        $AWS configure set default.s3.addressing_style path
+
+        case "$DL_SOURCE" in
+          s3://*)
+            ts "===== 1. 列清单 ====="
+            SRC=${DL_SOURCE%/}/
+            PREFIX=${SRC#s3://*/}
+            for k in 1 2 3; do
+              if $AWS s3 ls --no-sign-request --recursive "$SRC" > /tmp/ls.txt; then break; fi
+              ts "列清单第 $k 次失败，30 秒后重试"; sleep 30
+            done
+            $ENV/bin/python /tmp/summarize.py /tmp/ls.txt "$PREFIX" $MAN/$DL_NAME.keys.tsv $MAN/$DL_NAME.summary.txt && S_LIST=OK
+            head -40 $MAN/$DL_NAME.summary.txt
+            ;;
+          http://*|https://*)
+            ts "===== 1. 只测连通性与速度（不下载数据）====="
+            {
+              echo "source: $DL_SOURCE"; echo "tested_at_utc: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+              echo "--- HEAD"; curl -sSIL -m 30 "$DL_SOURCE" 2>&1 | head -30
+              echo "--- 60 秒下载测速（数据丢弃）"
+              curl -sSL -m 60 -o /dev/null -w "http_code=%{http_code} bytes=%{size_download} speed=%{speed_download} B/s\n" "$DL_SOURCE" 2>&1
+            } > $MAN/$DL_NAME.probe.txt
+            cat $MAN/$DL_NAME.probe.txt
+            S_PROBE=DONE; S_LIST=SKIP
+            ;;
+          *) echo "DL_SOURCE 必须以 s3:// 或 http(s):// 开头" ;;
+        esac
+
+        ts "===== 汇总 ====="
+        echo "SUMMARY mode=list env=$S_ENV list=$S_LIST probe=$S_PROBE name=$DL_NAME"
+        echo "结束后回传到 s3://tenant-vww8n20rmcahx6ur-20260904-1fbu/pvb/data/raw/（_manifest/、_logs/）"
+    outputs:
+    - url: s3://tenant-vww8n20rmcahx6ur-20260904-1fbu/pvb/data/raw/
+  timeout:
+    exec_timeout: 30m

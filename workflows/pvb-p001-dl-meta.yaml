@@ -1,0 +1,191 @@
+# P001（V4c）：ds004080 只下元数据（json/tsv/txt）。由 pvb-download-sync.yaml 复制，改了 name、★3、storage（2026-11-26）
+# pvb-download-sync：按清单分批下载一个 S3 公开数据集 → 按清单核对 → SHA256 → 回传到 Bucket pvb/data/raw/<DL_NAME>/
+# 来自 S2R 时期实测通过的 s2r-s1-download.yaml（11-19 s2r-s1-download-1：466 个文件 / 42.36 GB，VERIFY_OK），2026-11-26 改写为通用模板：
+#   - 加了分批（DL_INCLUDE）：共享规则第 8 条——任务结束才回传，超时被杀什么都不回传，所以每批预计 ≤ 2 小时（约 12 MB/s，2 小时约 80 GB）
+#   - 清单来自先跑一次的 pvb-download-list（data/raw/_manifest/<DL_NAME>.keys.tsv），只核对本批 include 命中的文件
+# **第一次使用前它还没在平台上跑过**：先用很小的一批试（例如 DL_INCLUDE="dataset_description.json participants.tsv"）
+#
+# ======== 每次只改这里（带 ★） ========
+#  workflow.name：pvb-<编号>-dl-<批次>，例如 pvb-p002-dl-meta（必须以 pvb- 开头）
+#  ★1 DL_NAME：数据集代号（与 list 时相同），例如 ds004080
+#  ★2 DL_SOURCE：s3://openneuro.org/ds004080
+#  ★3 DL_INCLUDE：本批要下的文件，空格分隔的通配符，相对数据集根目录；"*" 能跨目录（与 aws --include 相同）
+#       例："*.json *.tsv"（只下全部 sidecar）  "sub-ccepAgeUMCU0[1-5]/* dataset_description.json"  留空 = 全部
+#  ★4 DL_BATCH：批次名，用于日志和校验和文件名，例如 meta、b01
+#  ★5 exec_timeout：按 本批 GiB ÷ 0.011 GiB/s 估算 + 50% 余量（核对和 SHA256 另加约 10%）
+#  核对用的清单 = inputs 第 1 条（pvb/data/raw/_manifest/），先跑 list 才会有
+# =================================================
+workflow:
+  name: pvb-p001-dl-meta
+  resources:
+    default:
+      gpu: 1                 # 只为了落在缓存了镜像的 L20 节点上
+      cpu: 16
+      memory: 64Gi
+      storage: 20Gi          # 元数据批很小（下单前用 keys.tsv 核对）
+      platform: l20
+  tasks:
+  - name: download
+    image: nvcr.io/nvidia/pytorch:24.10-py3
+    command: ["/bin/bash"]
+    args: ["/tmp/entry.sh"]
+    environment:
+      DL_NAME: ds004080                          # ★1
+      DL_SOURCE: s3://openneuro.org/ds004080     # ★2
+      DL_INCLUDE: "*.json *.tsv *.txt CHANGES README*"   # ★3 只下元数据（V4c）
+      DL_BATCH: meta                             # ★4
+      HTTP_PROXY: http://172.26.12.11:3128
+      HTTPS_PROXY: http://172.26.12.11:3128
+      http_proxy: http://172.26.12.11:3128
+      https_proxy: http://172.26.12.11:3128
+      NO_PROXY: localhost,127.0.0.1,172.26.11.53,172.26.0.0/16,10.96.0.0/12,10.244.0.0/12,192.168.0.0/16,10.0.0.0/8,.svc,.svc.cluster.local,.cnomnibot.com
+      no_proxy: localhost,127.0.0.1,172.26.11.53,172.26.0.0/16,10.96.0.0/12,10.244.0.0/12,192.168.0.0/16,10.0.0.0/8,.svc,.svc.cluster.local,.cnomnibot.com
+      PIP_CONFIG_FILE: /dev/null
+      AWS_DEFAULT_REGION: us-east-1
+    inputs:
+    # 0：S2R 的环境包（含 awscli），只读
+    - url: s3://tenant-vww8n20rmcahx6ur-20260904-1fbu/s2r/env/s2r-env-3/
+    # 1：本项目 list 任务产生的清单
+    - url: s3://tenant-vww8n20rmcahx6ur-20260904-1fbu/pvb/data/raw/_manifest/
+    files:
+    - path: /tmp/verify.py
+      contents: |
+        # 用法：python verify.py <keys.tsv> <本地数据集目录> <空格分隔的 include 通配符，可为空字符串>
+        # 由 s2r-s1-download 的 verify.py 改来：清单里的路径相对数据集根目录；只核对 include 命中的文件
+        import os, sys, fnmatch
+        keys_tsv, root = sys.argv[1], sys.argv[2]
+        pats = sys.argv[3].split() if len(sys.argv) > 3 else []
+        def hit(rel):
+            return (not pats) or any(fnmatch.fnmatchcase(rel, p) for p in pats)
+        expect = {}
+        for line in open(keys_tsv, encoding="utf-8"):
+            k, s = line.rstrip("\n").split("\t")
+            if hit(k):
+                expect[k] = int(s)
+        missing, wrong = [], []
+        for rel, size in expect.items():
+            p = os.path.join(root, rel)
+            if not os.path.isfile(p):
+                missing.append(rel)
+            elif os.path.getsize(p) != size:
+                wrong.append((rel, size, os.path.getsize(p)))
+        local = set()
+        for d, _, fs in os.walk(root):
+            for f in fs:
+                local.add(os.path.relpath(os.path.join(d, f), root).replace(os.sep, "/"))
+        extra = sorted(local - set(expect))
+        tot = sum(expect.values())
+        print(f"本批清单 {len(expect)} 个文件 {tot/2**30:.2f} GiB | 本地 {len(local)} 个文件")
+        print(f"缺失 {len(missing)} | 大小不符 {len(wrong)} | 清单外多出 {len(extra)}")
+        for m in missing[:20]: print("  MISSING", m)
+        for w in wrong[:20]: print("  SIZE", w)
+        for e in extra[:20]: print("  EXTRA", e)
+        if not expect:
+            print("VERIFY_FAIL（include 没有命中清单里的任何文件）"); sys.exit(1)
+        if missing or wrong:
+            print("VERIFY_FAIL"); sys.exit(1)
+        print("VERIFY_OK")
+    - path: /tmp/entry.sh
+      contents: |
+        set -u
+        OUT={{output}}
+        IN0={{input:0}}
+        IN1={{input:1}}
+        RAW=$OUT/$DL_NAME
+        LOG=$OUT/_logs
+        MAN=$OUT/_manifest
+        mkdir -p $RAW $LOG $MAN
+        exec > >(tee -a $LOG/${DL_NAME}_${DL_BATCH}_download.log) 2>&1
+        T0=$(date +%s)
+        ts() { echo "[$(date -u +%H:%M:%S) +$(( ($(date +%s) - T0) / 60 ))min] $*"; }
+        ENVS=/osmo/run/workspace/envs
+        ENV=$ENVS/s2r
+        S_ENV=FAIL; S_KEYS=FAIL; S_SYNC=FAIL; S_VERIFY=FAIL
+        ts "===== PVB download-sync  name=$DL_NAME  batch=$DL_BATCH  source=$DL_SOURCE ====="
+        echo "include: ${DL_INCLUDE:-（全部）}"
+
+        ts "===== 0. 恢复 s2r-env-3 环境 ====="
+        EXPECT=83d7201844ec4d886b4971c6e7a72ab7c658e642f3ca3cd5a41d196b961eb67f
+        GOT=$(sha256sum $IN0/s2r-venv.tar.gz | cut -d' ' -f1)
+        if [ "$GOT" = "$EXPECT" ]; then
+          mkdir -p $ENVS && tar -xzf $IN0/s2r-venv.tar.gz -C $ENVS && $ENV/bin/aws --version && S_ENV=OK
+        else
+          echo "venv sha256 不符: $GOT"
+        fi
+        AWS=$ENV/bin/aws
+        $AWS configure set default.s3.addressing_style path
+        KEYS=$IN1/$DL_NAME.keys.tsv
+        [ -f "$KEYS" ] && S_KEYS=OK || echo "找不到清单 $KEYS：先跑 pvb-download-list"
+        df -h $OUT | tail -1
+
+        # aws 的 include 参数：先排除全部，再逐个放行
+        INC=()
+        if [ -n "${DL_INCLUDE:-}" ]; then
+          INC+=(--exclude "*")
+          for pt in $DL_INCLUDE; do INC+=(--include "$pt"); done
+        fi
+        # 本批预计大小（用于进度显示）
+        EXP_GB=$($ENV/bin/python - "$KEYS" "${DL_INCLUDE:-}" <<'PY' 2>/dev/null || echo "?"
+        import sys, fnmatch
+        pats = sys.argv[2].split()
+        tot = 0
+        for line in open(sys.argv[1], encoding="utf-8"):
+            k, s = line.rstrip("\n").split("\t")
+            if not pats or any(fnmatch.fnmatchcase(k, p) for p in pats):
+                tot += int(s)
+        print(f"{tot/1e9:.2f}")
+        PY
+        )
+        echo "本批预计 $EXP_GB GB"
+
+        if [ "$S_ENV$S_KEYS" = "OKOK" ]; then
+          ts "===== 1. 下载（aws s3 sync，可断点续传；失败最多重试 5 轮） ====="
+          # 进度监视：每 5 分钟报一次。trap 保证 kill 时连同正在 sleep 的子进程一起结束（否则孤儿 sleep 占住日志管道，脚本迟迟不退出）
+          ( trap 'kill $SP 2>/dev/null; exit 0' TERM
+            while true; do
+              sleep 300 & SP=$!; wait $SP
+              B=$(du -sb $RAW 2>/dev/null | awk '{print $1}'); N=$(find $RAW -type f | wc -l)
+              ts "进度 $N 个文件 $(awk -v b=${B:-0} 'BEGIN{printf "%.2f", b/1e9}') GB / $EXP_GB GB"
+            done ) &
+          MON=$!
+          for k in 1 2 3 4 5; do
+            ts "sync 第 $k 轮"
+            if $AWS s3 sync --no-sign-request --only-show-errors ${INC[@]+"${INC[@]}"} "${DL_SOURCE%/}" $RAW; then
+              S_SYNC=OK; break
+            fi
+            ts "sync 第 $k 轮出错，60 秒后续传"; sleep 60
+          done
+          kill $MON 2>/dev/null; wait $MON 2>/dev/null
+          ts "下载结束：$(find $RAW -type f | wc -l) 个文件，$(du -sh $RAW | cut -f1)"
+
+          ts "===== 2. 按清单核对 ====="
+          $ENV/bin/python /tmp/verify.py $KEYS $RAW "${DL_INCLUDE:-}" | tee $MAN/${DL_NAME}_${DL_BATCH}.verify.txt
+          grep -q "^VERIFY_OK" $MAN/${DL_NAME}_${DL_BATCH}.verify.txt && S_VERIFY=OK
+
+          ts "===== 3. 记录信息 + SHA256 校验和 ====="
+          {
+            echo "dataset: $DL_NAME"
+            echo "source: $DL_SOURCE (--no-sign-request)"
+            echo "batch: $DL_BATCH"
+            echo "include: ${DL_INCLUDE:-（全部）}"
+            echo "downloaded_at_utc: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            echo "files: $(find $RAW -type f | wc -l)"
+            echo "bytes: $(du -sb $RAW | cut -f1)"
+            echo "verify: $S_VERIFY"
+            echo "workflow: {{workflow_id}}"
+            echo "host: $(hostname)"
+            echo "--- CHANGES (head) ---"; head -20 $RAW/CHANGES 2>/dev/null
+          } > $MAN/${DL_NAME}_${DL_BATCH}_DOWNLOAD_INFO.txt
+          cat $MAN/${DL_NAME}_${DL_BATCH}_DOWNLOAD_INFO.txt
+          (cd $RAW && find . -type f -print0 | sort -z | xargs -0 -P 8 -n 20 sha256sum) | sort -k2 > $LOG/${DL_NAME}_${DL_BATCH}_SHA256SUMS.txt
+          echo "SHA256SUMS: $(wc -l < $LOG/${DL_NAME}_${DL_BATCH}_SHA256SUMS.txt) 行"
+        fi
+
+        ts "===== 汇总 ====="
+        echo "SUMMARY mode=sync env=$S_ENV keys=$S_KEYS sync=$S_SYNC verify=$S_VERIFY name=$DL_NAME batch=$DL_BATCH"
+        echo "结束后回传到 s3://tenant-vww8n20rmcahx6ur-20260904-1fbu/pvb/data/raw/（$DL_NAME/、_manifest/、_logs/）"
+        ts "===== DONE ====="
+    outputs:
+    - url: s3://tenant-vww8n20rmcahx6ur-20260904-1fbu/pvb/data/raw/
+  timeout:
+    exec_timeout: 30m        # ★5

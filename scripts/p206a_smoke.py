@@ -50,6 +50,7 @@ def find_cls(names):
 
 def try_forward(model, dev, shapes):
     import torch
+    ok_any = False
     for shp in shapes:
         try:
             x = torch.randn(*shp, device=dev)
@@ -66,10 +67,20 @@ def try_forward(model, dev, shapes):
                         yf = model(x, **{kw: True})
                     descf = {k: (tuple(v.shape) if hasattr(v, "shape") else type(v).__name__) for k, v in yf.items()} if isinstance(yf, dict) else (tuple(yf.shape) if hasattr(yf, "shape") else type(yf))
                     say(f"    forward{shp}, {kw}=True → {descf}")
-            return True
+                    for k, v in (yf.items() if isinstance(yf, dict) else []):
+                        if isinstance(v, (list, tuple)):
+                            say(f"      {k}: " + ", ".join(str(tuple(t.shape)) if hasattr(t, "shape") else type(t).__name__ for t in v)[:400])
+            ok_any = True                                 # 2026-11-27 A4：每个形状都试（原来第一个成功就返回）
         except Exception as e:  # noqa: BLE001
             say(f"    forward{shp} 失败：{e!r}"[:300])
-    return False
+    return ok_any
+
+
+def safe_attr(m, at):
+    try:
+        return getattr(m, at, None)
+    except Exception:  # noqa: BLE001
+        return None
 
 
 def real_model_dir(path: Path) -> Path:
@@ -135,9 +146,13 @@ def braindecode_model(tag, names, path, dev, shapes):
     m = m.to(dev).eval()
     say(f"  预训练：参数 {nparam(m) / 1e6:.1f} M")
     for at in ("sfreq", "n_times", "n_chans", "n_outputs", "input_window_seconds", "chs_info"):
-        if hasattr(m, at):
-            v = getattr(m, at)
+        v = safe_attr(m, at)                          # 2026-11-27 A4：braindecode 未设置的属性抛 ValueError，hasattr 拦不住（A3 因此中断）
+        if v is not None:
             say(f"    {at} = {str(v)[:200]}")
+    try:
+        say("  --- get_config()：", str(m.get_config())[:1500])
+    except Exception as e:  # noqa: BLE001
+        say("  get_config 读不到", repr(e)[:200])
     try:
         say("  --- forward 参数：", str(inspect.signature(m.forward))[:800])
         for n in ("_native_features", "_pool_embedding"):
@@ -149,17 +164,17 @@ def braindecode_model(tag, names, path, dev, shapes):
     cfgs = [p for p in real.glob("*.json")]
     for p in cfgs:
         say(f"  --- {p.name}（前 1500 字）"); say("  " + p.read_text(encoding="utf-8")[:1500].replace("\n", "\n  "))
-    n_ch = getattr(m, "n_chans", None) or 4
-    n_t = getattr(m, "n_times", None)
+    n_ch = safe_attr(m, "n_chans") or 4
+    n_t = safe_attr(m, "n_times")
     sh = [s for s in shapes(n_ch, n_t)]
     ok = try_forward(m, dev, sh)
     for shp in sh[:2]:
         try_native(m, dev, shp)
-    try:
-        kw = {k: getattr(m, k) for k in ("n_chans", "n_times", "n_outputs", "sfreq", "chs_info") if hasattr(m, k) and getattr(m, k) is not None
-              and k in inspect.signature(cls.__init__).parameters}
-        r = cls(**kw)
-        say(f"  随机初始化（同结构，参数 {kw.keys()}）：参数 {nparam(r) / 1e6:.1f} M（应与预训练相同）")
+    try:                                              # 2026-11-27 A4：同结构 = 用预训练的完整配置重建（只给 n_chans 等会得到默认的小模型）
+        r = cls.from_config(m.get_config())
+        same = sum(1 for a, b in zip(m.state_dict().values(), r.state_dict().values()) if a.shape == b.shape)
+        say(f"  随机初始化（from_config(get_config())）：参数 {nparam(r) / 1e6:.1f} M（应与预训练相同）；"
+            f"张量形状一致 {same} / {len(m.state_dict())}")
     except Exception as e:  # noqa: BLE001
         say(f"  随机初始化失败：{e!r}"[:300])
     del m
@@ -201,15 +216,15 @@ def main():
     # 输入形状候选：模型自带 n_times 就用它；否则试 5 s @ 2048 Hz、5 s @ 512 Hz、2 s @ 512 Hz
     shapes_bd = lambda c, t: ([(1, c, t)] if t else []) + [(1, c, 10240), (1, c, 2560), (1, c, 1024)]  # noqa: E731
     # 2026-11-27 A3：P206 的观测段 2.99 s；BrainBERT 2048 Hz → 6123 点，逐电极放进 batch（n_chans = 1）
-    shapes_bb = lambda c, t: [(8, 1, 6123), (8, 1, 10240), (1, 8, 6123)]  # noqa: E731
-    shapes_mvp = lambda c, t: ([(1, 8, t)] if t else []) + [(1, 8, 2560), (1, 8, 5120), (1, 8, 1531)]  # noqa: E731
+    shapes_bb = lambda c, t: [(8, 1, 2048), (8, 1, 6123), (116, 1, 6123), (1, 8, 6123)]  # noqa: E731  预训练配置 n_times = 2048（1 s）
+    shapes_mvp = lambda c, t: [(1, 32, 10240), (1, 8, 2560), (1, 116, 2560), (1, 8, 1531), (4, 64, 2560)]  # noqa: E731
     jobs = {
         "BrainBERT": lambda: braindecode_model("BrainBERT", ["BrainBERT"], md / "brainbert", dev, shapes_bb),
         "MVPFormer-S": lambda: braindecode_model("MVPFormer-S", ["MVPFormer"], md / "mvpformer_s", dev, shapes_mvp),
         "MVPFormer-M": lambda: braindecode_model("MVPFormer-M", ["MVPFormer"], md / "mvpformer_m", dev, shapes_mvp),
         # PopT 的输入是逐电极的 BrainBERT 表征（768 维）
         "PopT": lambda: braindecode_model("PopT", ["PopulationTransformer", "PopT"], md / "popt", dev,
-                                          lambda c, t: [(1, 16, 768), (1, c, t or 768)]),
+                                          lambda c, t: [(1, 16, 768), (1, 116, 768)]),
         "MOMENT": lambda: (say("\n===== MOMENT（momentfm，embedding）"), check_moment(md, dev))[1],
         "Chronos": lambda: (say("\n===== Chronos（chronos-t5-large，embed）"), check_chronos(md, dev))[1],
     }

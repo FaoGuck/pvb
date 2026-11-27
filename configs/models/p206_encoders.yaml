@@ -1,4 +1,4 @@
-# P206 各模型的读法（pvb/t2/encoders.py 读取）。**草案 2026-11-27**（接口按 pvb-p206a3-smoke-4 的前向形状）；
+# P206 各模型的读法（pvb/t2/encoders.py 读取）。**🔒 2026-11-27 锁定（docs/00 第 14 节，Yunkai “按草案锁定”）**，下面注释里的“草案”即锁定值；接口按 pvb-p206a3-smoke-4 的前向形状；
 #   C（闸门 5 人实测耗时）之前由 Yunkai 确认，锁定后写进 docs/00 第 14 节（docs/06 第 3 节第 6 条：每个模型一种固定读法）
 # 通用：path = 相对 --models-dir（容器里 $PRJ_DATA/models，即 Bucket pvb/data/models/）的权重目录；
 #       名字后加 “-rand” = 同结构随机初始化（from_config(get_config())，种子 rand_seed）

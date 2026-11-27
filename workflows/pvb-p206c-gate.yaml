@@ -1,0 +1,171 @@
+# P206 C：闸门 5 人（UMCU01–05，17 个 run）上实测各模型的提取耗时，并跑一次完整评估（docs/06 第 4 节 C；2026-11-27）
+# 串联两个任务：
+#   extract（环境 pvb-env-2，GPU）：scripts/p206_extract.py，每段只读一次信号、所有模型共用；4 卡各一个子进程
+#       模型：brainbert(-rand)、popt(-rand)、mvpformer_s(-rand)、mvpformer_m、chronos（MOMENT 在另一个环境，D 时单独跑）
+#       输出 data/t2/d5/fm/<模型>/<患者>/<run>_emb.npz → 回传 Bucket pvb/data/t2/d5/fm/
+#   eval（环境 s2r-env-3，与 P205 / P205b 同一个数值环境，基线数字应与 20261127-0808_b0df3a4 的闸门 5 人逐位相同）：
+#       scripts/p206_eval.py，读 Bucket pvb/data/t2/d5/（标签、观测累加量、上一步的表征）
+# 目的是**耗时**（SUMMARY 的 ch_seg_per_s、runs.tsv 每个 run × 模型的秒数）→ 定 D（全量 117 个 run）的卡数和超时；
+#   闸门 5 人的评估数字只作流程核对（5 人不做组水平检验，判据只在 D 上看）
+# 输入走 Bucket 内网（5 名患者 ≈ 33.6 GiB + 权重 ≈ 15.5 GiB + 环境 3.3 GB），不需要外网
+# 预计：extract ≈ 30–60 min（4 卡），eval ≈ 10–20 min → ≈ 4 卡 × 1.3 h ≈ ¥15
+workflow:
+  name: pvb-p206c-gate
+  resources:
+    default:
+      gpu: 4
+      cpu: 60
+      memory: 360Gi
+      storage: 150Gi
+      platform: l20
+  tasks:
+  - name: extract
+    image: nvcr.io/nvidia/pytorch:24.10-py3
+    command: ["/bin/bash"]
+    args: ["/tmp/entry.sh"]
+    environment:
+      PRJ_STEP: scripts/p206_extract.py
+      PRJ_ARGS: "--models brainbert,brainbert-rand,popt,popt-rand,mvpformer_s,mvpformer_s-rand,mvpformer_m,chronos --workers 4 --gpus 4"
+      HF_HUB_OFFLINE: "1"
+      HF_HUB_DISABLE_TELEMETRY: "1"
+      PIP_CONFIG_FILE: /dev/null
+      OMP_NUM_THREADS: "4"
+      MKL_NUM_THREADS: "4"
+    files:
+    - path: /tmp/entry.sh
+      contents: |
+        set -u
+        ROOT=/osmo/run/workspace/proj_PVB
+        export PRJ_CODE=$ROOT/pvb PRJ_DATA=$ROOT/data PRJ_OUT=$ROOT/out
+        export PRJ_RUN_ID={{workflow_id}}_extract
+        mkdir -p $PRJ_CODE $PRJ_DATA $PRJ_OUT/logs {{output}}
+        LOG=$PRJ_OUT/logs/$PRJ_RUN_ID.log
+        exec > >(tee -a $LOG) 2>&1
+        echo "===== PVB run $PRJ_RUN_ID  $(date '+%F %T')  host=$(hostname) ====="
+        echo "step=$PRJ_STEP args=$PRJ_ARGS"
+        ENV_OK=FAIL; CODE_OK=FAIL; DATA_OK=FAIL; RC=-1
+        # 1. 环境 pvb-env-2（A2；解压路径不能改）
+        EXPECT=030033776fc027313a22947eff6ffd27db4c3449664de067c35f7717e19a4df3
+        GOT=$(sha256sum {{input:0}}/pvb-venv-2.tar.gz | cut -d' ' -f1)
+        if [ "$GOT" = "$EXPECT" ]; then
+          mkdir -p /osmo/run/workspace/envs && tar -xzf {{input:0}}/pvb-venv-2.tar.gz -C /osmo/run/workspace/envs && ENV_OK=OK
+        else
+          echo "venv sha256 不符: $GOT"
+        fi
+        PY=/osmo/run/workspace/envs/pvb-2/bin/python
+        # 2. 代码
+        cp -a {{input:1}}/. $PRJ_CODE/ && [ -f "$PRJ_CODE/$PRJ_STEP" ] && CODE_OK=OK
+        GV=$PRJ_CODE/_git_version.txt
+        PRJ_GIT=$( [ -f "$GV" ] && sed -n 's/^git=\([^ ]*\).*/\1/p' "$GV" || echo nogit )
+        export PRJ_GIT=${PRJ_GIT:-nogit}
+        echo "code: git=$PRJ_GIT"
+        # 3. 数据：权重（软链接，encoders.py 会解析成真实目录）、5 名闸门患者的原始数据
+        mkdir -p $PRJ_DATA/models && cp -as {{input:2}}/. $PRJ_DATA/models/
+        D5=$PRJ_DATA/raw/ds004080
+        mkdir -p $D5/sub-ccepAgeUMCU01 $D5/sub-ccepAgeUMCU02 $D5/sub-ccepAgeUMCU03 $D5/sub-ccepAgeUMCU04 $D5/sub-ccepAgeUMCU05
+        cp -as {{input:3}}/. $D5/sub-ccepAgeUMCU01/ && cp -as {{input:4}}/. $D5/sub-ccepAgeUMCU02/ && \
+          cp -as {{input:5}}/. $D5/sub-ccepAgeUMCU03/ && cp -as {{input:6}}/. $D5/sub-ccepAgeUMCU04/ && \
+          cp -as {{input:7}}/. $D5/sub-ccepAgeUMCU05/ && DATA_OK=OK
+        echo "data_in: $(ls -d $D5/sub-* | wc -l) 名患者，$(find -L $D5 -name '*_events.tsv' | wc -l) 个 run，$(du -shL $D5 | cut -f1)；models: $(ls $PRJ_DATA/models | tr '\n' ' ')"
+        nvidia-smi --query-gpu=index,name,memory.total --format=csv,noheader
+        # 4. 运行（外面再套一层 timeout：超时被杀什么都不回传，这样至少能回传已完成的 run）
+        touch $ROOT/.start_marker; sleep 1
+        if [ "$ENV_OK$CODE_OK$DATA_OK" = "OKOKOK" ]; then
+          cd $PRJ_CODE
+          PYTHONPATH=$PRJ_CODE timeout 150m $PY $PRJ_STEP $PRJ_ARGS
+          RC=$?
+        fi
+        # 5. 收集
+        cd $ROOT
+        { echo "run_id=$PRJ_RUN_ID"; echo "step=$PRJ_STEP $PRJ_ARGS"; echo "git=$PRJ_GIT"; echo "rc=$RC"; echo "finished=$(date '+%F %T')"; } > out/logs/$PRJ_RUN_ID.meta.txt
+        echo "--- 回传文件"
+        find data out -type f -newer .start_marker -not -path "*/__pycache__/*" -not -name "*.tmp.npz" > /tmp/collected.txt 2>/dev/null
+        head -30 /tmp/collected.txt
+        echo "共 $(wc -l < /tmp/collected.txt) 个，$(cat /tmp/collected.txt | xargs -r -d '\n' du -ch 2>/dev/null | tail -1 | cut -f1)"
+        cp /tmp/collected.txt out/logs/$PRJ_RUN_ID.collected.txt && echo out/logs/$PRJ_RUN_ID.collected.txt >> /tmp/collected.txt
+        echo "SUMMARY env=$ENV_OK code=$CODE_OK data=$DATA_OK rc=$RC git=$PRJ_GIT"
+        sleep 2
+        xargs -a /tmp/collected.txt -r -d '\n' cp --parents -t {{output}}
+        exit 0
+    inputs:
+    - url: s3://tenant-vww8n20rmcahx6ur-20260904-1fbu/pvb/env/pvb-env-2/
+    - url: s3://tenant-vww8n20rmcahx6ur-20260904-1fbu/pvb/pvb/
+    - url: s3://tenant-vww8n20rmcahx6ur-20260904-1fbu/pvb/data/models/
+    - url: s3://tenant-vww8n20rmcahx6ur-20260904-1fbu/pvb/data/raw/ds004080/sub-ccepAgeUMCU01/
+    - url: s3://tenant-vww8n20rmcahx6ur-20260904-1fbu/pvb/data/raw/ds004080/sub-ccepAgeUMCU02/
+    - url: s3://tenant-vww8n20rmcahx6ur-20260904-1fbu/pvb/data/raw/ds004080/sub-ccepAgeUMCU03/
+    - url: s3://tenant-vww8n20rmcahx6ur-20260904-1fbu/pvb/data/raw/ds004080/sub-ccepAgeUMCU04/
+    - url: s3://tenant-vww8n20rmcahx6ur-20260904-1fbu/pvb/data/raw/ds004080/sub-ccepAgeUMCU05/
+    outputs:
+    - url: s3://tenant-vww8n20rmcahx6ur-20260904-1fbu/pvb/
+  - name: eval
+    image: nvcr.io/nvidia/pytorch:24.10-py3
+    command: ["/bin/bash"]
+    args: ["/tmp/entry.sh"]
+    environment:
+      PRJ_STEP: scripts/p206_eval.py
+      PRJ_ARGS: "--models brainbert,brainbert-rand,popt,popt-rand,mvpformer_s,mvpformer_s-rand,mvpformer_m,chronos --procs 5"
+      PRJ_DATA_IN: data/t2/d5
+      PIP_CONFIG_FILE: /dev/null
+      OMP_NUM_THREADS: "8"
+      MKL_NUM_THREADS: "8"
+      OPENBLAS_NUM_THREADS: "8"
+    files:
+    - path: /tmp/entry.sh
+      contents: |
+        set -u
+        ROOT=/osmo/run/workspace/proj_PVB
+        export PRJ_CODE=$ROOT/pvb PRJ_DATA=$ROOT/data PRJ_OUT=$ROOT/out
+        export PRJ_RUN_ID={{workflow_id}}_eval
+        mkdir -p $PRJ_CODE $PRJ_DATA $PRJ_OUT/logs {{output}}
+        LOG=$PRJ_OUT/logs/$PRJ_RUN_ID.log
+        exec > >(tee -a $LOG) 2>&1
+        echo "===== PVB run $PRJ_RUN_ID  $(date '+%F %T')  host=$(hostname) ====="
+        echo "step=$PRJ_STEP args=$PRJ_ARGS data_in=$PRJ_DATA_IN"
+        ENV_OK=FAIL; CODE_OK=FAIL; DATA_OK=FAIL; RC=-1
+        # 1. 环境 s2r-env-3（只读借用；与 P205 / P205b 相同）
+        EXPECT=83d7201844ec4d886b4971c6e7a72ab7c658e642f3ca3cd5a41d196b961eb67f
+        GOT=$(sha256sum {{input:0}}/s2r-venv.tar.gz | cut -d' ' -f1)
+        if [ "$GOT" = "$EXPECT" ]; then
+          mkdir -p /osmo/run/workspace/envs && tar -xzf {{input:0}}/s2r-venv.tar.gz -C /osmo/run/workspace/envs && ENV_OK=OK
+        else
+          echo "venv sha256 不符: $GOT"
+        fi
+        PY=/osmo/run/workspace/envs/s2r/bin/python
+        # 2. 代码
+        cp -a {{input:1}}/. $PRJ_CODE/ && [ -f "$PRJ_CODE/$PRJ_STEP" ] && CODE_OK=OK
+        GV=$PRJ_CODE/_git_version.txt
+        PRJ_GIT=$( [ -f "$GV" ] && sed -n 's/^git=\([^ ]*\).*/\1/p' "$GV" || echo nogit )
+        export PRJ_GIT=${PRJ_GIT:-nogit}
+        echo "code: git=$PRJ_GIT"
+        # 3. 数据：data/t2/d5（标签、观测累加量、extract 刚回传的表征）
+        mkdir -p "$ROOT/$PRJ_DATA_IN" && cp -as {{input:2}}/. "$ROOT/$PRJ_DATA_IN/" && DATA_OK=OK
+        echo "data_in: $(find -L "$ROOT/$PRJ_DATA_IN" -type f | wc -l) 个文件；表征 $(find -L "$ROOT/$PRJ_DATA_IN/fm" -name '*_emb.npz' 2>/dev/null | wc -l) 个"
+        # 4. 运行
+        touch $ROOT/.start_marker; sleep 1
+        if [ "$ENV_OK$CODE_OK$DATA_OK" = "OKOKOK" ]; then
+          cd $PRJ_CODE
+          PYTHONPATH=$PRJ_CODE MPLBACKEND=Agg timeout 100m $PY $PRJ_STEP $PRJ_ARGS
+          RC=$?
+        fi
+        # 5. 收集
+        cd $ROOT
+        { echo "run_id=$PRJ_RUN_ID"; echo "step=$PRJ_STEP $PRJ_ARGS"; echo "git=$PRJ_GIT"; echo "rc=$RC"; echo "finished=$(date '+%F %T')"; } > out/logs/$PRJ_RUN_ID.meta.txt
+        echo "--- 回传文件"
+        find data out -type f -newer .start_marker -not -path "*/__pycache__/*" > /tmp/collected.txt 2>/dev/null
+        head -30 /tmp/collected.txt
+        echo "共 $(wc -l < /tmp/collected.txt) 个"
+        cp /tmp/collected.txt out/logs/$PRJ_RUN_ID.collected.txt && echo out/logs/$PRJ_RUN_ID.collected.txt >> /tmp/collected.txt
+        echo "SUMMARY env=$ENV_OK code=$CODE_OK data=$DATA_OK rc=$RC git=$PRJ_GIT"
+        sleep 2
+        xargs -a /tmp/collected.txt -r -d '\n' cp --parents -t {{output}}
+        exit 0
+    inputs:
+    - url: s3://tenant-vww8n20rmcahx6ur-20260904-1fbu/s2r/env/s2r-env-3/
+    - url: s3://tenant-vww8n20rmcahx6ur-20260904-1fbu/pvb/pvb/
+    - url: s3://tenant-vww8n20rmcahx6ur-20260904-1fbu/pvb/data/t2/d5/
+    - task: extract
+    outputs:
+    - url: s3://tenant-vww8n20rmcahx6ur-20260904-1fbu/pvb/
+  timeout:
+    exec_timeout: 300m

@@ -78,6 +78,15 @@ def test_extract_heldout_period():
     assert np.array_equal(E0, E1, equal_nan=True) and np.array_equal(S0, S1, equal_nan=True)
 
 
+def test_laplacian_nearest2():
+    """BrainBERT 的重参考：一条 10 mm 间距的电极条，中间电极 = 自己 − 两侧均值；缺坐标的为 NaN。"""
+    xyz = np.array([[0, 0, 0], [10, 0, 0], [20, 0, 0], [30, 0, 0], [np.nan] * 3], float)
+    x = np.arange(5 * 4, dtype=float).reshape(5, 4) ** 2
+    y = encs.laplacian_nearest2(x, xyz)
+    assert np.allclose(y[1], x[1] - 0.5 * (x[0] + x[2])) and np.allclose(y[2], x[2] - 0.5 * (x[1] + x[3]))
+    assert np.isnan(y[4]).all() and np.isfinite(y[:4]).all()
+
+
 def test_extract_masks_own_stim():
     x, stim = TO.make()
     a0 = emb_of(x, stim)
@@ -225,7 +234,7 @@ def test_eval_e2e(tmp: Path, cfg: dict):
 
 
 def main():
-    for f in [test_extract_tail_noise, test_extract_heldout_period, test_extract_masks_own_stim]:
+    for f in [test_extract_tail_noise, test_extract_heldout_period, test_extract_masks_own_stim, test_laplacian_nearest2]:
         f(); print("OK", f.__name__)
     tmp = Path(tempfile.mkdtemp(prefix="pvb_p206_"))
     cfg = yaml.safe_load(open(CODE / "configs/datasets/p_d5_ds004080.yaml", encoding="utf-8"))

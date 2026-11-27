@@ -1,22 +1,40 @@
-# P206 各模型的读法（pvb/t2/encoders.py 读取）。**草案 2026-11-27**：
-#   braindecode 的三个模型（BrainBERT、PopT、MVPFormer）等 A2 冒烟报告（采样率、输入长度、前向形状）后补；
+# P206 各模型的读法（pvb/t2/encoders.py 读取）。**草案 2026-11-27**（接口按 pvb-p206a3-smoke-4 的前向形状）；
 #   C（闸门 5 人实测耗时）之前由 Yunkai 确认，锁定后写进 docs/00 第 14 节（docs/06 第 3 节第 6 条：每个模型一种固定读法）
 # 通用：path = 相对 --models-dir（容器里 $PRJ_DATA/models，即 Bucket pvb/data/models/）的权重目录；
-#       名字后加 “-rand” = 同结构随机初始化（种子 rand_seed）
+#       名字后加 “-rand” = 同结构随机初始化（from_config(get_config())，种子 rand_seed）
+#       观测段统一 2.99 s（P204），框架按每个模型的 sfreq 降 / 升采样
 rand_seed: 0
 
 spec_test:            # 只给测试 / 冒烟用，不是 P206 的模型
   sfreq: 256
 
-chronos:              # chronos-t5-large（Apache-2.0）；编码器末层，时间上平均
-  path: chronos_t5_large
-  sfreq: 128          # 草案：2.99 s 观测段 → 383 个点（Chronos 上下文上限 512）
-  zscore: true        # 草案：每段每通道 z 分数（只用段内数据）；Chronos 自己还会做均值缩放
-  batch: 128          # 一次送进模型的通道数
+brainbert:            # 42.6 M；预训练 2048 Hz、Laplacian 重参考；每个电极单独输入
+  path: brainbert
+  sfreq: 2048         # 2048 Hz 的 run 不重采样；512 Hz 的 5 个 run 升采样（256 Hz 以上为空，报告里注明）
+  reref: laplacian    # 草案：减去 MNI 距离最近的两个可用电极的均值（ECoG 近似“相邻触点”）
+  readout: all_frames # 草案：2.99 s → 104 帧全部平均；备选 center10（模型自带，中间 10 帧，上游协议）
+  batch: 256
 
-moment:               # MOMENT-1-large（MIT）；embedding 任务
+popt:                 # 20 M；输入 = BrainBERT 特征（上面的读法）+ 电极坐标；逐电极表征 = 去掉 CLS 的 tokens（512 维）
+  path: popt
+  coords: mni         # 草案：MNI mm 直接给（预训练是 Brain Treebank 的坐标空间，解释时写明）；备选 none = 不给坐标
+
+mvpformer_s:          # 73.6 M；512 Hz；每 token 5 s；多通道一起输入（≤ 128）
+  path: mvpformer_s
+  sfreq: 512          # 2.99 s = 1531 点，模型补成 1 个 5 s 段（A4 核对形状）
+mvpformer_m:          # 1 239 M；同上
+  path: mvpformer_m
+  sfreq: 512
+
+chronos:              # chronos-t5-large（709 M，D = 1024）；编码器末层，时间上平均
+  path: chronos_t5_large
+  sfreq: 128          # 草案：2.99 s → 383 个点（上下文上限 512）
+  zscore: true        # 草案：每段每通道 z 分数（只用段内数据）；Chronos 自己还会做均值缩放
+  batch: 128
+
+moment:               # MOMENT-1-large（341 M，D = 1024）；embedding 任务；在 pvb-env-moment-1 环境（缺 pyarrow）
   path: moment_large
-  sfreq: 170          # 草案：2.99 s → 508 个点，补到 512
+  sfreq: 170          # 草案：2.99 s → 508 个点，左侧补到 512（input_mask 标出）
   n_times: 512
   zscore: true
   batch: 128

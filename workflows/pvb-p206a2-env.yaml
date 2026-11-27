@@ -1,0 +1,64 @@
+# P206 准备 A2：用独立 Python（uv）建两个环境包 pvb-env-2（Py3.12：braindecode 2.1.0 + Chronos）与 pvb-env-moment-1（Py3.11：MOMENT），
+#   并用 A 已下好的权重做冒烟与接口核实（V8a–c）。原因见 tools/p206_env_setup2.sh 文件头（A：braindecode 要 Python ≥ 3.11，镜像是 3.10）
+# 由 pvb-p206a-env.yaml 改（2026-11-27）：name、调用的脚本、加第 2 个输入（Bucket pvb/data/models/ → data/models，只读）、storage、超时
+# 外网下载：uv、两个 Python、torch cu126 轮子（约 3–5 GB，第二个环境走缓存）+ 其他包；预计 1 卡 ≈ 40–70 min
+workflow:
+  name: pvb-p206a2-env
+  resources:
+    default:
+      gpu: 1
+      cpu: 16
+      memory: 64Gi
+      storage: 150Gi
+      platform: l20
+  tasks:
+  - name: run
+    image: nvcr.io/nvidia/pytorch:24.10-py3
+    command: ["/bin/bash"]
+    args: ["/tmp/entry.sh"]
+    environment:
+      HTTP_PROXY: http://172.26.12.11:3128
+      HTTPS_PROXY: http://172.26.12.11:3128
+      http_proxy: http://172.26.12.11:3128
+      https_proxy: http://172.26.12.11:3128
+      NO_PROXY: localhost,127.0.0.1,172.26.11.53,172.26.0.0/16,10.96.0.0/12,10.244.0.0/12,192.168.0.0/16,10.0.0.0/8,.svc,.svc.cluster.local,.cnomnibot.com
+      no_proxy: localhost,127.0.0.1,172.26.11.53,172.26.0.0/16,10.96.0.0/12,10.244.0.0/12,192.168.0.0/16,10.0.0.0/8,.svc,.svc.cluster.local,.cnomnibot.com
+      PIP_CONFIG_FILE: /dev/null
+      HF_HUB_DISABLE_TELEMETRY: "1"
+    files:
+    - path: /tmp/entry.sh
+      contents: |
+        set -u
+        ROOT=/osmo/run/workspace/proj_PVB
+        export PRJ_CODE=$ROOT/pvb PRJ_DATA=$ROOT/data PRJ_OUT=$ROOT/out
+        export PRJ_RUN_ID={{workflow_id}}
+        mkdir -p $PRJ_CODE $PRJ_DATA $PRJ_OUT/logs {{output}}
+        LOG=$PRJ_OUT/logs/$PRJ_RUN_ID.log
+        exec > >(tee -a $LOG) 2>&1
+        echo "===== PVB run $PRJ_RUN_ID  $(date '+%F %T')  host=$(hostname) ====="
+        cp -a {{input:0}}/. $PRJ_CODE/
+        GV=$PRJ_CODE/_git_version.txt
+        PRJ_GIT=$( [ -f "$GV" ] && sed -n 's/^git=\([^ ]*\).*/\1/p' "$GV" || echo nogit )
+        echo "code: git=$PRJ_GIT"
+        mkdir -p $PRJ_DATA/models && cp -as {{input:1}}/. $PRJ_DATA/models/ && echo "models: $(ls $PRJ_DATA/models)"
+        touch $ROOT/.start_marker; sleep 1
+        bash $PRJ_CODE/tools/p206_env_setup2.sh
+        RC=$?
+        cd $ROOT
+        { echo "run_id=$PRJ_RUN_ID"; echo "step=tools/p206_env_setup2.sh"; echo "git=$PRJ_GIT"; echo "rc=$RC"; echo "finished=$(date '+%F %T')"; } > out/logs/$PRJ_RUN_ID.meta.txt
+        echo "--- 回传文件"
+        find data out env -type f -newer .start_marker -not -path "*/__pycache__/*" -not -path "*/.cache/*" > /tmp/collected.txt 2>/dev/null
+        head -60 /tmp/collected.txt
+        echo "共 $(wc -l < /tmp/collected.txt) 个"
+        cp /tmp/collected.txt out/logs/$PRJ_RUN_ID.collected.txt && echo out/logs/$PRJ_RUN_ID.collected.txt >> /tmp/collected.txt
+        echo "SUMMARY rc=$RC git=$PRJ_GIT"
+        sleep 2
+        xargs -a /tmp/collected.txt -r -d '\n' cp --parents -t {{output}}
+        exit 0
+    inputs:
+    - url: s3://tenant-vww8n20rmcahx6ur-20260904-1fbu/pvb/pvb/
+    - url: s3://tenant-vww8n20rmcahx6ur-20260904-1fbu/pvb/data/models/   # A 下好的权重（≈ 15.5 GiB，只读）
+    outputs:
+    - url: s3://tenant-vww8n20rmcahx6ur-20260904-1fbu/pvb/
+  timeout:
+    exec_timeout: 150m

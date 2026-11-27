@@ -61,6 +61,11 @@ def run_subject(sub: str, cfg: dict, data: Path) -> tuple[dict, pd.DataFrame, pd
     r = u[u.n1_detected.astype(bool)].reset_index(drop=True)
     r = r.assign(amp_log=amp_target(r.winmin_uv))
     base = dict(subject=sub, n_resp=len(r), n_units=len(u), n_pairs_resp=r.stim_pair.nunique(), adj_thr_mm=round(thr, 2))
+    n_ne = len(set(fold_of[p] for p in u.stim_pair.unique()))
+    min_ne = cfg["folds"].get("min_nonempty_folds", cfg["folds"]["k"])
+    if n_ne < min_ne:                                   # 2026-11-27 排除规则（00 第 14 节），与 P205 相同
+        note = f"不可评估：按组分折后非空折 {n_ne} < {min_ne}（刺激对经共用电极连成 {len(set(fo.pair_components(pairs).values()))} 组）"
+        return {**base, "note": note}, pd.DataFrame(), pd.DataFrame(), f"SKIP {sub} {note}"
     if len(r) < cb["min_units"]:
         return {**base, "note": f"有 N1 的单位 < {cb['min_units']}，不评估"}, pd.DataFrame(), pd.DataFrame(), \
             f"SKIP {sub} n_resp={len(r)}"
@@ -106,7 +111,10 @@ def main():
     with ProcessPoolExecutor(max_workers=max(1, min(a.procs, len(subs)))) as ex:
         futs = {ex.submit(run_subject, s, cfg, data): s for s in subs}
         for fu in as_completed(futs):
-            r, p, q, msg = fu.result()
+            try:                                        # 逐患者容错（S2R 约定；2026-11-27）
+                r, p, q, msg = fu.result()
+            except Exception as e:  # noqa: BLE001
+                r, p, q, msg = dict(subject=futs[fu], note=f"FAIL {e!r}"[:300]), pd.DataFrame(), pd.DataFrame(), f"FAIL {futs[fu]} {e!r}"
             R.append(r); P.append(p); Q.append(q); log(msg)
     R.sort(key=lambda r: r["subject"])
     res = pd.DataFrame(R)

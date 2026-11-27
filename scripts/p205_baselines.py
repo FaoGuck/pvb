@@ -55,6 +55,12 @@ def run_subject(sub: str, cfg: dict, data: Path) -> tuple[dict, pd.DataFrame, pd
     pool = bl.ObsPool(accs) if accs else None
     pairs = sorted(set(u.stim_pair) | (set(pool.owners) if pool else set()))
     fold_of = fo.assign_folds(pairs, cfg["folds"]["k"], cfg["folds"]["seed"])
+    n_ne = len(set(fold_of[p] for p in u.stim_pair.unique()))
+    min_ne = cfg["folds"].get("min_nonempty_folds", cfg["folds"]["k"])
+    if n_ne < min_ne:                                   # 2026-11-27 排除规则（00 第 14 节）：只看结构
+        note = f"不可评估：按组分折后非空折 {n_ne} < {min_ne}（刺激对经共用电极连成 {len(set(fo.pair_components(pairs).values()))} 组）"
+        return dict(subject=sub, n_units=len(u), n_units_all=len(lab), n_pairs=u.stim_pair.nunique(), note=note), \
+            pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), f"SKIP {sub} {note}"
     pred, chosen = bl.cv_predict(u, fold_of, pool, SETS, cfg["baselines"])
     y = u.n1_detected.to_numpy(bool)
     auc = {s: bl.safe_auc(y, pred[s]) for s in SETS}
@@ -100,7 +106,11 @@ def main():
     with ProcessPoolExecutor(max_workers=max(1, min(a.procs, len(subs)))) as ex:   # 按患者并行
         futs = {ex.submit(run_subject, s, cfg, data): s for s in subs}
         for fu in as_completed(futs):
-            r, p, q, f, msg = fu.result()
+            try:                                        # 逐患者容错（S2R 约定；2026-11-27 扩到 74 人时一个患者崩溃拖垮了全部）
+                r, p, q, f, msg = fu.result()
+            except Exception as e:  # noqa: BLE001
+                r, p, q, f, msg = dict(subject=futs[fu], note=f"FAIL {e!r}"[:300]), pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), \
+                    f"FAIL {futs[fu]} {e!r}"
             R.append(r); P.append(p); Q.append(q); F.append(f); log(msg)
     R.sort(key=lambda r: r["subject"])
     res = pd.DataFrame(R)
@@ -111,7 +121,7 @@ def main():
     met = [dict(exp_id=EXP_ID, run_id=os.environ["PRJ_RUN_ID"], git_commit=runs.git_commit(), track="T2", dataset=cfg["dataset"],
                 subject=r.subject, model=c.replace("auc_", ""), feature_set=c.replace("auc_", ""), fold="all",
                 stim_pair="all", metric="auroc", value=r[c], n_pairs=r.n_pairs, n_targets=r.n_units, seed=cfg["folds"]["seed"])
-           for _, r in res.iterrows() for c in [f"auc_{s}" for s in SETS] + ["ceiling_auroc"]]
+           for _, r in res[res["auc_B3"].notna()].iterrows() for c in [f"auc_{s}" for s in SETS] + ["ceiling_auroc"]]   # 不可评估的患者不进长表
     pd.DataFrame(met).to_csv(d / "metrics.csv", index=False)
     med01, medc = float(res["auc_B0+B1"].median()), float(res.ceiling_auroc.median())
     g3 = (med01 <= 0.90) and (med01 <= medc - 0.05)

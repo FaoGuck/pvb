@@ -125,51 +125,57 @@ def braindecode_model(tag, names, path, dev, shapes):
     return ok
 
 
+def check_moment(md, dev):
+    import torch
+    from momentfm import MOMENTPipeline
+    m = MOMENTPipeline.from_pretrained(str(md / "moment_large"), model_kwargs={"task_name": "embedding"})
+    m.init(); m = m.to(dev).eval()
+    with torch.no_grad():
+        o = m(x_enc=torch.randn(2, 1, 512, device=dev))
+    say(f"  参数 {nparam(m) / 1e6:.1f} M；(2,1,512) → embeddings {tuple(o.embeddings.shape)}；显存峰值 {gpu_peak():.2f} GiB")
+    return True
+
+
+def check_chronos(md, dev):
+    import torch
+    from chronos import ChronosPipeline
+    p = ChronosPipeline.from_pretrained(str(md / "chronos_t5_large"), device_map=dev, torch_dtype=torch.float32)
+    emb, _ = p.embed(torch.randn(2, 512))
+    say(f"  参数 {nparam(p.model) / 1e6:.1f} M；(2,512) → embed {tuple(emb.shape)}；显存峰值 {gpu_peak():.2f} GiB")
+    return True
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--models-dir", required=True)
     ap.add_argument("--report", required=True)
+    ap.add_argument("--only", default="", help="逗号分隔：BrainBERT,MVPFormer-S,MVPFormer-M,PopT,MOMENT,Chronos；空 = 全部（2026-11-27 加：两个环境分开测）")
     a = ap.parse_args()
     import torch
     dev = "cuda" if torch.cuda.is_available() else "cpu"
-    say(f"torch {torch.__version__} device {dev} {torch.cuda.get_device_name(0) if dev == 'cuda' else ''}")
+    say(f"python {sys.version.split()[0]} torch {torch.__version__} device {dev} {torch.cuda.get_device_name(0) if dev == 'cuda' else ''}")
     md = Path(a.models_dir)
-    res = {}
-    # 输入形状候选：模型自带 n_times 就用它；否则试 BrainBERT 的 5 s @ 2048 Hz、MVPFormer 常见的 5 s @ 512 Hz 等
+    want = [x for x in a.only.split(",") if x] or ["BrainBERT", "MVPFormer-S", "MVPFormer-M", "PopT", "MOMENT", "Chronos"]
+    # 输入形状候选：模型自带 n_times 就用它；否则试 5 s @ 2048 Hz、5 s @ 512 Hz、2 s @ 512 Hz
     shapes_bd = lambda c, t: ([(1, c, t)] if t else []) + [(1, c, 10240), (1, c, 2560), (1, c, 1024)]  # noqa: E731
-    for tag, names, sub in [("BrainBERT", ["BrainBERT"], "brainbert"),
-                            ("MVPFormer-S", ["MVPFormer"], "mvpformer_s"),
-                            ("MVPFormer-M", ["MVPFormer"], "mvpformer_m")]:
+    jobs = {
+        "BrainBERT": lambda: braindecode_model("BrainBERT", ["BrainBERT"], md / "brainbert", dev, shapes_bd),
+        "MVPFormer-S": lambda: braindecode_model("MVPFormer-S", ["MVPFormer"], md / "mvpformer_s", dev, shapes_bd),
+        "MVPFormer-M": lambda: braindecode_model("MVPFormer-M", ["MVPFormer"], md / "mvpformer_m", dev, shapes_bd),
+        # PopT 的输入是逐电极的 BrainBERT 表征（768 维）
+        "PopT": lambda: braindecode_model("PopT", ["PopulationTransformer", "PopT"], md / "popt", dev,
+                                          lambda c, t: [(1, 16, 768), (1, c, t or 768)]),
+        "MOMENT": lambda: (say("\n===== MOMENT（momentfm，embedding）"), check_moment(md, dev))[1],
+        "Chronos": lambda: (say("\n===== Chronos（chronos-t5-large，embed）"), check_chronos(md, dev))[1],
+    }
+    res = {}
+    for tag in want:
         try:
-            res[tag] = braindecode_model(tag, names, md / sub, dev, shapes_bd)
+            res[tag] = bool(jobs[tag]())
         except Exception as e:  # noqa: BLE001
-            say(f"{tag} 异常 {e!r}"); say(traceback.format_exc()[-1500:]); res[tag] = False
-    try:  # PopT 的输入是逐电极的 BrainBERT 表征（768 维）
-        res["PopT"] = braindecode_model("PopT", ["PopulationTransformer", "PopT"], md / "popt", dev,
-                                        lambda c, t: [(1, 16, 768), (1, c, t or 768)])
-    except Exception as e:  # noqa: BLE001
-        say(f"PopT 异常 {e!r}"); res["PopT"] = False
-    say("\n===== MOMENT（momentfm，embedding）")
-    try:
-        from momentfm import MOMENTPipeline
-        m = MOMENTPipeline.from_pretrained(str(md / "moment_large"), model_kwargs={"task_name": "embedding"})
-        m.init(); m = m.to(dev).eval()
-        with torch.no_grad():
-            o = m(x_enc=torch.randn(2, 1, 512, device=dev))
-        say(f"  参数 {nparam(m) / 1e6:.1f} M；(2,1,512) → embeddings {tuple(o.embeddings.shape)}；显存峰值 {gpu_peak():.2f} GiB")
-        res["MOMENT"] = True
-        del m
-    except Exception as e:  # noqa: BLE001
-        say(f"  失败 {e!r}"[:400]); say(traceback.format_exc()[-1200:]); res["MOMENT"] = False
-    say("\n===== Chronos（chronos-t5-large，embed）")
-    try:
-        from chronos import ChronosPipeline
-        p = ChronosPipeline.from_pretrained(str(md / "chronos_t5_large"), device_map=dev, torch_dtype=torch.float32)
-        emb, _ = p.embed(torch.randn(2, 512))
-        say(f"  参数 {nparam(p.model) / 1e6:.1f} M；(2,512) → embed {tuple(emb.shape)}；显存峰值 {gpu_peak():.2f} GiB")
-        res["Chronos"] = True
-    except Exception as e:  # noqa: BLE001
-        say(f"  失败 {e!r}"[:400]); say(traceback.format_exc()[-1200:]); res["Chronos"] = False
+            say(f"{tag} 失败 {e!r}"[:400]); say(traceback.format_exc()[-1500:]); res[tag] = False
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
     say("\nSUMMARY_SMOKE " + " ".join(f"{k}={'OK' if v else 'FAIL'}" for k, v in res.items()))
     Path(a.report).write_text("\n".join(LINES) + "\n", encoding="utf-8")
     sys.exit(0 if all(res.values()) else 1)

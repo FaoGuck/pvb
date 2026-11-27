@@ -35,3 +35,17 @@ p110:
     eeg_ptp_max_uv: 150
     eeg_ignore_channels: [Fp1, Fp2]
   g0_t1_2: {min_trials: 200, min_subjects: 10}     # 00 第 8 节（锁定）
+
+# ---- P111：连续降采样派生（2026-11-27；范围 = spTMS 全部 348 + rest 119，00 第 14 节） ----
+p111:
+  tasks: [spTMS, rest]
+  out_dir: derived/d4/cont        # 相对 $PRJ_DATA：每个 run 一个 .h5（不拉回本地：MASK 排除 *.h5）
+  qc_dir: derived/d4/qc           # 每个 run 一个小 parquet（逐脉冲、逐导联的 W3 峰峰值 + MEP），会拉回本地
+  done_dir: derived/d4/_done      # 每个完成的 run 一个小 txt（下一批据此跳过）
+  sfreq: {eeg: 1000, aux: 1000, emg: 5000}   # aux = ECG、VEOG、HEOG
+  cut_before_pulse_ms: 2          # 按脉冲分段：每段到“下一个脉冲前 2 ms”为止，降采样滤波不跨过脉冲（防泄漏，00 第 6 节第 1 条）
+  pad_s: 0.1                      # 每段两端对称延拓 0.1 s 再做抗混叠降采样（resample_poly）
+  verify:
+    chunk_s: 10                   # 核对：取一段 10 s，派生值与“原始低通后抽取”的相关 ≥ min_corr
+    min_corr: 0.99
+  budget_min: 105                 # 一个任务最多花这么多分钟开始新的 run（之后收尾回传；exec_timeout 另留余量）

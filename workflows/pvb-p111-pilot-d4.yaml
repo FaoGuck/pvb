@@ -1,0 +1,104 @@
+# P111 试跑：D4 连续降采样派生，只做 3 个 run（CON001 async4ms 的 spTMS run-01、run-02 和 rest run-01，约 6 GiB 原始）
+# 由 pvb-p110-mep-d4.yaml 复制（2026-11-27）：改 name、★1、★2、exec_timeout
+# 目的：核对派生文件大小、核对相关、刺激侧（与 P110 的同两个 run 对照：run-01 左 M1、run-02 右 M1）、每个 run 的下载 / 处理耗时 → 定正式批次
+# 做法见 scripts/p111_d4_derive.py 文件头；防泄漏 tests/test_d4_derive_leakage.py；参数 configs/datasets/p_d4_ds004024.yaml 的 p111
+workflow:
+  name: pvb-p111-pilot-d4
+  resources:
+    default:
+      gpu: 1
+      cpu: 16
+      memory: 64Gi
+      storage: 30Gi          # 一次只放 1 个 run（≤ 3.1 GiB）
+      platform: l20
+  tasks:
+  - name: run
+    image: nvcr.io/nvidia/pytorch:24.10-py3
+    command: ["/bin/bash"]
+    args: ["/tmp/entry.sh"]
+    environment:
+      PRJ_STEP: scripts/p111_d4_derive.py      # ★1
+      PRJ_ARGS: "--runs sub-CON001_ses-async4ms_task-spTMS_run-01,sub-CON001_ses-async4ms_task-spTMS_run-02,sub-CON001_ses-async4ms_task-rest_run-01"   # ★2
+      PRJ_DATA_IN: data/raw/_manifest          # ★3（只需要 ds004024.keys.tsv）
+      HTTP_PROXY: http://172.26.12.11:3128
+      HTTPS_PROXY: http://172.26.12.11:3128
+      NO_PROXY: localhost,127.0.0.1,172.26.11.53,172.26.0.0/16,10.96.0.0/12,10.244.0.0/12,192.168.0.0/16,10.0.0.0/8,.svc,.svc.cluster.local,.cnomnibot.com
+      http_proxy: http://172.26.12.11:3128
+      https_proxy: http://172.26.12.11:3128
+      no_proxy: localhost,127.0.0.1,172.26.11.53,172.26.0.0/16,10.96.0.0/12,10.244.0.0/12,192.168.0.0/16,10.0.0.0/8,.svc,.svc.cluster.local,.cnomnibot.com
+      PIP_CONFIG_FILE: /dev/null
+      AWS_DEFAULT_REGION: us-east-1
+    files:
+    - path: /tmp/entry.sh
+      contents: |
+        set -u
+        ROOT=/osmo/run/workspace/proj_PVB
+        export PRJ_CODE=$ROOT/pvb PRJ_DATA=$ROOT/data PRJ_OUT=$ROOT/out
+        export PRJ_RUN_ID={{workflow_id}}
+        mkdir -p $PRJ_CODE $PRJ_DATA $PRJ_OUT/logs {{output}}
+        LOG=$PRJ_OUT/logs/$PRJ_RUN_ID.log
+        exec > >(tee -a $LOG) 2>&1
+        echo "===== PVB run $PRJ_RUN_ID  $(date '+%F %T')  host=$(hostname) ====="
+        echo "step=$PRJ_STEP args=$PRJ_ARGS data_in=$PRJ_DATA_IN"
+        ENV_OK=FAIL; CODE_OK=FAIL; DATA_OK=FAIL; RC=-1
+
+        # 1. 环境
+        EXPECT=83d7201844ec4d886b4971c6e7a72ab7c658e642f3ca3cd5a41d196b961eb67f
+        GOT=$(sha256sum {{input:0}}/s2r-venv.tar.gz | cut -d' ' -f1)
+        if [ "$GOT" = "$EXPECT" ]; then
+          mkdir -p /osmo/run/workspace/envs && tar -xzf {{input:0}}/s2r-venv.tar.gz -C /osmo/run/workspace/envs && ENV_OK=OK
+        else
+          echo "venv sha256 不符: $GOT"
+        fi
+        PY=/osmo/run/workspace/envs/s2r/bin/python
+        /osmo/run/workspace/envs/s2r/bin/aws configure set default.s3.addressing_style path && /osmo/run/workspace/envs/s2r/bin/aws --version
+        df -h /osmo/run/workspace | tail -1
+
+        # 2. 代码（复制一份，可写）
+        cp -a {{input:1}}/. $PRJ_CODE/ && [ -f "$PRJ_CODE/$PRJ_STEP" ] && CODE_OK=OK
+        # 提交号：容器里没有 .git（push 时排除），读 push_code.bat 写的 _git_version.txt
+        GV=$PRJ_CODE/_git_version.txt
+        if [ -f "$GV" ]; then
+          PRJ_GIT=$(sed -n 's/^git=\([^ ]*\).*/\1/p' "$GV"); PRJ_GIT_DIRTY=$(sed -n 's/.* dirty=\([0-9]*\).*/\1/p' "$GV")
+        else
+          PRJ_GIT=nogit; PRJ_GIT_DIRTY=-1
+        fi
+        export PRJ_GIT=${PRJ_GIT:-nogit} PRJ_GIT_DIRTY=${PRJ_GIT_DIRTY:--1}
+        echo "code: git=$PRJ_GIT dirty_files=$PRJ_GIT_DIRTY"
+
+        # 3. 数据：按原相对路径放好（目录是真目录，文件是指向输入的软链接，这样新写的文件能和输入区分开）
+        mkdir -p "$ROOT/$PRJ_DATA_IN" && cp -as {{input:2}}/. "$ROOT/$PRJ_DATA_IN/" && DATA_OK=OK
+        echo "data_in: $(find -L "$ROOT/$PRJ_DATA_IN" -type f | wc -l) files"
+
+        # 4. 运行
+        touch $ROOT/.start_marker; sleep 1
+        if [ "$ENV_OK$CODE_OK$DATA_OK" = "OKOKOK" ]; then
+          cd $PRJ_CODE
+          PYTHONPATH=$PRJ_CODE MPLBACKEND=Agg $PY $PRJ_STEP $PRJ_ARGS
+          RC=$?
+        fi
+
+        # 5. 收集：只把本次新产生或改动过的真实文件，按原相对路径写回（软链接 = 输入，不回传）
+        cd $ROOT
+        {
+          echo "run_id=$PRJ_RUN_ID"; echo "step=$PRJ_STEP $PRJ_ARGS"; echo "data_in=$PRJ_DATA_IN"
+          echo "git=$PRJ_GIT dirty=$PRJ_GIT_DIRTY"; echo "rc=$RC"; echo "finished=$(date '+%F %T')"
+        } > out/logs/$PRJ_RUN_ID.meta.txt
+        echo "--- 回传文件"
+        # 先把完整清单写进文件再显示前几行（11-23 修：原来 `| tee | head` 在 head 退出时连带终止 tee，清单被截断，多出的文件不回传）
+        find data out -type f -newer .start_marker -not -path "*/__pycache__/*" > /tmp/collected.txt 2>/dev/null
+        head -50 /tmp/collected.txt
+        echo "共 $(wc -l < /tmp/collected.txt) 个"
+        cp /tmp/collected.txt out/logs/$PRJ_RUN_ID.collected.txt && echo out/logs/$PRJ_RUN_ID.collected.txt >> /tmp/collected.txt
+        echo "SUMMARY env=$ENV_OK code=$CODE_OK data=$DATA_OK rc=$RC git=$PRJ_GIT"
+        sleep 2
+        xargs -a /tmp/collected.txt -r -d '\n' cp --parents -t {{output}}
+        exit 0
+    inputs:
+    - url: s3://tenant-vww8n20rmcahx6ur-20260904-1fbu/s2r/env/s2r-env-3/
+    - url: s3://tenant-vww8n20rmcahx6ur-20260904-1fbu/pvb/pvb/
+    - url: s3://tenant-vww8n20rmcahx6ur-20260904-1fbu/pvb/data/raw/_manifest/   # ★4
+    outputs:
+    - url: s3://tenant-vww8n20rmcahx6ur-20260904-1fbu/pvb/
+  timeout:
+    exec_timeout: 40m

@@ -1,0 +1,59 @@
+# 平台测试：一个工作流里两个串联任务（2026-11-27，为 P111 一次提交、自动一批接一批而写）
+# 要验证的三件事（OSMO 6.2 文档写法见 docs/05 第 4 节 11-27）：
+#   ① `inputs: - task: t1` 的串联写法能否被接受、t2 是否等 t1 结束才开始
+#   ② t1 的 outputs（url）是否在 t1 结束时就回传到 Bucket，t2 的 url 输入能否读到它（P111 的“已完成标记”靠这个）；
+#      t2 的输入编号（input:N）：url 输入在前、task 输入在后时各是几号
+#   ③ exec_timeout 是整个工作流合计还是每个任务各算：每个任务各睡 100 s，exec_timeout 4m
+#      → 两个都 COMPLETED = 各算；t2 被杀（FAILED_EXEC_TIMEOUT）= 合计
+# 不用环境包、不读代码；只写 pvb/out/logs/chaintest/ 下的几个小文本文件。预计 ≈ 6 min，≈ ¥0.3
+workflow:
+  name: pvb-test-chain
+  resources:
+    default:
+      gpu: 1                 # 只为了落在缓存了镜像的 L20 节点上
+      cpu: 4
+      memory: 16Gi
+      storage: 10Gi
+      platform: l20
+  tasks:
+  - name: t1
+    image: nvcr.io/nvidia/pytorch:24.10-py3
+    command: ["/bin/bash"]
+    args: ["/tmp/entry.sh"]
+    files:
+    - path: /tmp/entry.sh
+      contents: |
+        set -u
+        D={{output}}/out/logs/chaintest
+        mkdir -p $D
+        echo "t1 start $(date -u +%FT%TZ) host=$(hostname) wf={{workflow_id}}" | tee $D/t1.txt
+        sleep 100
+        echo "t1 end $(date -u +%FT%TZ)" | tee -a $D/t1.txt
+        exit 0
+    outputs:
+    - url: s3://tenant-vww8n20rmcahx6ur-20260904-1fbu/pvb/
+  - name: t2
+    image: nvcr.io/nvidia/pytorch:24.10-py3
+    command: ["/bin/bash"]
+    args: ["/tmp/entry.sh"]
+    files:
+    - path: /tmp/entry.sh
+      contents: |
+        set -u
+        D={{output}}/out/logs/chaintest
+        mkdir -p $D
+        {
+          echo "t2 start $(date -u +%FT%TZ) host=$(hostname)"
+          echo "--- input:0（url pvb/out/logs/）里的 chaintest："; ls -la {{input:0}}/chaintest 2>&1; cat {{input:0}}/chaintest/t1.txt 2>&1
+          echo "--- input:1（task t1）："; find {{input:1}} -maxdepth 4 2>&1 | head -20; cat {{input:1}}/out/logs/chaintest/t1.txt 2>&1
+        } | tee $D/t2.txt
+        sleep 100
+        echo "t2 end $(date -u +%FT%TZ)" | tee -a $D/t2.txt
+        exit 0
+    inputs:
+    - url: s3://tenant-vww8n20rmcahx6ur-20260904-1fbu/pvb/out/logs/
+    - task: t1
+    outputs:
+    - url: s3://tenant-vww8n20rmcahx6ur-20260904-1fbu/pvb/
+  timeout:
+    exec_timeout: 4m

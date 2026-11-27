@@ -1,0 +1,22 @@
+# P206 各模型的读法（pvb/t2/encoders.py 读取）。**草案 2026-11-27**：
+#   braindecode 的三个模型（BrainBERT、PopT、MVPFormer）等 A2 冒烟报告（采样率、输入长度、前向形状）后补；
+#   C（闸门 5 人实测耗时）之前由 Yunkai 确认，锁定后写进 docs/00 第 14 节（docs/06 第 3 节第 6 条：每个模型一种固定读法）
+# 通用：path = 相对 --models-dir（容器里 $PRJ_DATA/models，即 Bucket pvb/data/models/）的权重目录；
+#       名字后加 “-rand” = 同结构随机初始化（种子 rand_seed）
+rand_seed: 0
+
+spec_test:            # 只给测试 / 冒烟用，不是 P206 的模型
+  sfreq: 256
+
+chronos:              # chronos-t5-large（Apache-2.0）；编码器末层，时间上平均
+  path: chronos_t5_large
+  sfreq: 128          # 草案：2.99 s 观测段 → 383 个点（Chronos 上下文上限 512）
+  zscore: true        # 草案：每段每通道 z 分数（只用段内数据）；Chronos 自己还会做均值缩放
+  batch: 128          # 一次送进模型的通道数
+
+moment:               # MOMENT-1-large（MIT）；embedding 任务
+  path: moment_large
+  sfreq: 170          # 草案：2.99 s → 508 个点，补到 512
+  n_times: 512
+  zscore: true
+  batch: 128

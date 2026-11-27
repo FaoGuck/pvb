@@ -81,3 +81,11 @@ amplitude:                            # P205b：响应电极的幅度基线（�
   alpha_grid: [0.1, 1.0, 10.0, 100.0, 1000.0]   # 岭回归 α，内层按组 CV 选（按 Spearman）
   min_units: 30                       # 某患者有 N1 的单位少于这个数 → 不评估（报告里写明，判据不通过）
   headroom_thr: 0.10                  # 判据：5 名患者“上限 − B3”的中位数 ≥ 0.10
+
+p206:                                 # 冻结基础模型（docs/06；框架 2026-11-27）。观测段、折、可用折、评估单位、预测头网格都与 P205 / P205b 相同
+  fm_dir: t2/d5/fm                    # p206_extract.py 的输出，相对 $PRJ_DATA：<fm_dir>/<模型>/<患者>/<run_id>_emb.npz
+  encoders_config: configs/models/p206_encoders.yaml
+  n_pc: 32                            # 草案（C 之前锁定）：高维块 Mh（E_r、s、E_r⊙s、|E_r−s|）在预测头里只在训练集上 PCA 到这个维数
+  within_pair_min: 8                  # 次要指标：刺激对内有 N1 的记录电极 ≥ 8 才算（00 第 14 节 11-26，已写死）
+  dist_edges: [20, 40]                # 题 A 的距离分段（mm）：< 20、20–40、≥ 40（00 第 14 节 11-26）
+  alternative: two-sided              # 草案（D 之前锁定）：组水平 Wilcoxon 的方向

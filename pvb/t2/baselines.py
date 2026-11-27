@@ -15,6 +15,7 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 from scipy.stats import spearmanr
+from sklearn.decomposition import PCA
 from sklearn.linear_model import LogisticRegression, Ridge
 from sklearn.metrics import roc_auc_score
 from sklearn.preprocessing import StandardScaler
@@ -85,9 +86,11 @@ def b2(units: pd.DataFrame, pool: ObsPool, owner_mask: np.ndarray) -> np.ndarray
 
 
 def build_features(units: pd.DataFrame, fold_of_pair: dict, pool: ObsPool | None, excl_folds: set,
-                   b2_pair_map: dict | None = None, source: pd.DataFrame | None = None) -> dict:
+                   b2_pair_map: dict | None = None, source: pd.DataFrame | None = None, extra=None) -> dict:
     """对 units（同一组“可用折”）构造 B0/B1/B2。excl_folds = 不可用的折；source = 患者全部单位（B1 的标签来源，
-    只取可用折的刺激对）。b2_pair_map：置换时 刺激对 → 取其 B2 的刺激对。"""
+    只取可用折的刺激对）。b2_pair_map：置换时 刺激对 → 取其 B2 的刺激对。
+    extra（P206，2026-11-27）：extra(units, allowed) → {块名: (n, d) 数组}，allowed = 可用折的刺激对集合；
+    基础模型表征只能来自 allowed 刺激对的观测段（pvb/t2/fm.py 的 EmbedPool 保证）。"""
     allowed = {p for p, f in fold_of_pair.items() if f not in excl_folds}
     src = units if source is None else source
     feats = {"B0": b0(units.dist_mm.to_numpy(float)), "B1": b1(units, src, allowed)}
@@ -95,16 +98,28 @@ def build_features(units: pd.DataFrame, fold_of_pair: dict, pool: ObsPool | None
         om = np.array([o in allowed for o in pool.owners])
         u = units if b2_pair_map is None else units.assign(stim_pair=units.stim_pair.map(b2_pair_map))
         feats["B2"] = b2(u, pool, om)
+    if extra is not None:
+        feats.update(extra(units, allowed))
     return feats
 
 
-def _fit_predict(Xtr, ytr, Xte, C, task: str = "clf"):
-    """task = clf：C 是逻辑回归的 C；task = reg：C 是岭回归的 α。"""
+def _fit_predict(Xtr, ytr, Xte, C, task: str = "clf", n_hi: int = 0, n_pc: int = 0):
+    """task = clf：C 是逻辑回归的 C；task = reg：C 是岭回归的 α。
+    n_hi > 0 且 n_pc > 0（P206，2026-11-27）：最后 n_hi 列（高维表征块）先标准化、只在训练集上拟合 PCA 降到 n_pc 维，
+    再与前面的低维列（B0 等）拼接、整体标准化。n_hi = 0 时与 P205 / P205b 完全相同。"""
     med = np.nanmedian(Xtr, axis=0)
     med = np.where(np.isfinite(med), med, 0.0)
     Xtr = np.where(np.isfinite(Xtr), Xtr, med); Xte = np.where(np.isfinite(Xte), Xte, med)
     if len(np.unique(ytr)) < 2:                        # 训练集只有一类 / 一个值：给常数预测
         return np.full(len(Xte), float(np.mean(ytr)))
+    if n_hi > 0 and n_pc > 0:
+        lo = Xtr.shape[1] - n_hi
+        sh = StandardScaler().fit(Xtr[:, lo:])
+        k = int(min(n_pc, n_hi, len(Xtr) - 1))
+        pca = PCA(n_components=k, svd_solver="randomized" if k < min(len(Xtr), n_hi) // 2 else "full",
+                  random_state=0).fit(sh.transform(Xtr[:, lo:]))
+        Xtr = np.hstack([Xtr[:, :lo], pca.transform(sh.transform(Xtr[:, lo:]))])
+        Xte = np.hstack([Xte[:, :lo], pca.transform(sh.transform(Xte[:, lo:]))])
     sc = StandardScaler().fit(Xtr)
     if task == "reg":
         return Ridge(alpha=C).fit(sc.transform(Xtr), ytr).predict(sc.transform(Xte))
@@ -127,10 +142,14 @@ def safe_auc(y, s) -> float:
 
 def cv_predict(units: pd.DataFrame, fold_of_pair: dict, pool: ObsPool | None, sets: list[str], cfg_b: dict,
                fixed_C: dict | None = None, b2_pair_map: dict | None = None, target: str = "n1_detected",
-               task: str = "clf", source: pd.DataFrame | None = None) -> tuple[dict, dict]:
+               task: str = "clf", source: pd.DataFrame | None = None, feature_sets: dict | None = None,
+               extra=None, pca_blocks: tuple = (), n_pc: int = 0) -> tuple[dict, dict]:
     """外层 K 折（按刺激对的折）。返回 {set: 每个单位的预测分数}、{(set, fold): 选中的 C（或 α）}。
     task = clf（P205，目标 N1 有无，按 AUROC 选 C，网格 cfg_b["C_grid"]）/ reg（P205b，连续目标，按 Spearman 选 α，
-    网格 cfg_b["alpha_grid"]）。source = B1 的标签来源（默认 units 本身；P205b 传 P205 的全部评估单位）。"""
+    网格 cfg_b["alpha_grid"]）。source = B1 的标签来源（默认 units 本身；P205b 传 P205 的全部评估单位）。
+    P206（2026-11-27；默认值下行为不变）：feature_sets = {set: [块名…]}（默认 FEATURE_SETS）；extra 见 build_features；
+    pca_blocks 里的块排在最后，在预测头里只在训练集上 PCA 到 n_pc 维（_fit_predict）。"""
+    FS = FEATURE_SETS if feature_sets is None else feature_sets
     fold = units.stim_pair.map(fold_of_pair).to_numpy()
     reg = task == "reg"
     y = units[target].to_numpy(float if reg else bool)
@@ -143,17 +162,19 @@ def cv_predict(units: pd.DataFrame, fold_of_pair: dict, pool: ObsPool | None, se
         te = fold == f
         if not te.any():
             continue
-        Fte = build_features(units[te], fold_of_pair, pool, {f}, b2_pair_map, source=src)
+        Fte = build_features(units[te], fold_of_pair, pool, {f}, b2_pair_map, source=src, extra=extra)
         tr_parts = {}
         for g in range(K):
             if g == f or not (fold == g).any():
                 continue
-            tr_parts[g] = build_features(units[fold == g], fold_of_pair, pool, {f, g}, b2_pair_map, source=src)
+            tr_parts[g] = build_features(units[fold == g], fold_of_pair, pool, {f, g}, b2_pair_map, source=src,
+                                         extra=extra)
         gs = sorted(tr_parts)
         ytr = np.concatenate([y[fold == g] for g in gs])
         gtr = np.concatenate([np.full((fold == g).sum(), g) for g in gs])
         for s in sets:
-            cols = FEATURE_SETS[s]
+            cols = [c for c in FS[s] if c not in pca_blocks] + [c for c in FS[s] if c in pca_blocks]
+            n_hi = sum(Fte[c].shape[1] for c in cols if c in pca_blocks)
             Xtr = np.concatenate([np.hstack([tr_parts[g][c] for c in cols]) for g in gs])
             Xte = np.hstack([Fte[c] for c in cols])
             if fixed_C is not None:
@@ -166,12 +187,14 @@ def cv_predict(units: pd.DataFrame, fold_of_pair: dict, pool: ObsPool | None, se
                         tr_h, va_h = gtr != h, gtr == h
                         if reg:
                             if va_h.sum() >= 3 and tr_h.sum() >= 3:
-                                sc.append(safe_spearman(ytr[va_h], _fit_predict(Xtr[tr_h], ytr[tr_h], Xtr[va_h], c, task)))
+                                sc.append(safe_spearman(ytr[va_h], _fit_predict(Xtr[tr_h], ytr[tr_h], Xtr[va_h], c, task,
+                                                                                n_hi, n_pc)))
                         elif 0 < ytr[va_h].sum() < va_h.sum() and 0 < ytr[tr_h].sum() < tr_h.sum():
-                            sc.append(safe_auc(ytr[va_h], _fit_predict(Xtr[tr_h], ytr[tr_h], Xtr[va_h], c)))
+                            sc.append(safe_auc(ytr[va_h], _fit_predict(Xtr[tr_h], ytr[tr_h], Xtr[va_h], c, task,
+                                                                       n_hi, n_pc)))
                     v = np.nanmean(sc) if np.isfinite(sc).any() else -np.inf
                     if v > best:
                         best, C = v, c
             chosen[(s, f)] = C
-            pred[s][te] = _fit_predict(Xtr, ytr, Xte, C, task)
+            pred[s][te] = _fit_predict(Xtr, ytr, Xte, C, task, n_hi, n_pc)
     return pred, chosen

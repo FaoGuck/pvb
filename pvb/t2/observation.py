@@ -80,6 +80,22 @@ def segment_measures(x: np.ndarray, sf: float, cfg_obs: dict) -> np.ndarray:
     return np.stack(out).astype(np.float64)
 
 
+def segment_valid(x: np.ndarray, owner_pair: str, next_pair: str, ci: dict, cfg_obs: dict) -> np.ndarray:
+    """一个观测段 x (n_ch, n) 里哪些通道可用（P204 与 P206 共用同一套屏蔽规则，2026-11-27 从 owner_accumulators 提出）：
+    去掉含 NaN 的、段内 |x| ≥ sat_uv 的、owner 与下一个脉冲的刺激电极。ci：通道名 → 行号。"""
+    valid = np.isfinite(x).all(axis=1)
+    valid &= ~(np.abs(np.nan_to_num(x)) >= cfg_obs["sat_uv"]).any(axis=1)
+    drop = []
+    if cfg_obs.get("mask_owner_stim", True):
+        drop += io_d5.pair_electrodes(owner_pair)
+    if cfg_obs.get("mask_next_stim", True) and next_pair:
+        drop += io_d5.pair_electrodes(next_pair)
+    for e in drop:
+        if e in ci:
+            valid[ci[e]] = False
+    return valid
+
+
 def owner_accumulators(reader, chans: list[str], picks: list[int], segs: pd.DataFrame, sfreq: float,
                        cfg_obs: dict) -> dict:
     """reader 需有 segments(picks, starts, n_samp)（io_d5.RawReader 或测试用的假读取器）。"""
@@ -96,16 +112,7 @@ def owner_accumulators(reader, chans: list[str], picks: list[int], segs: pd.Data
     masked_frac = []
     for r in segs.itertuples(index=False):
         x = reader.segments(picks, np.array([r.start]), r.stop - r.start)[0].astype(np.float64)
-        valid = np.isfinite(x).all(axis=1)
-        valid &= ~(np.abs(np.nan_to_num(x)) >= cfg_obs["sat_uv"]).any(axis=1)
-        drop = []
-        if cfg_obs.get("mask_owner_stim", True):
-            drop += io_d5.pair_electrodes(r.owner_pair)
-        if cfg_obs.get("mask_next_stim", True) and r.next_pair:
-            drop += io_d5.pair_electrodes(r.next_pair)
-        for e in drop:
-            if e in ci:
-                valid[ci[e]] = False
+        valid = segment_valid(x, r.owner_pair, r.next_pair, ci, cfg_obs)
         masked_frac.append(1 - valid.mean())
         if valid.sum() < 2:
             continue

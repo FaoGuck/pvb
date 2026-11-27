@@ -1,0 +1,78 @@
+# P206 准备 A3：只补 braindecode 四个模型（BrainBERT、MVPFormer-S、MVPFormer-M、PopT）的冒烟与接口核实（2026-11-27）
+# 为什么：A2（pvb-p206a2-env-1）环境 pvb-env-2 建好了，但四个模型 from_pretrained 都报 “Weights file must resolve inside the model
+#   directory”——容器里 data/models 是 cp -as 建的软链接，braindecode 2.1 要求权重文件的真实路径在模型目录内。
+#   scripts/p206a_smoke.py 已改为用软链接指向的真实目录加载，并打印类说明全文、forward 参数、config.json、按 2.99 s 观测段试前向。
+# 不建环境：直接用 A2 打好的环境包 pvb-env-2（sha256 见下），不需要外网。预计 1 卡 ≈ 20–30 min（解压 3.3 GB + 加载 MVPFormer-M 9 GB）
+# 产出：out/logs/<编号>.log（冒烟报告全文也在日志里）、out/logs/<编号>_smoke_env2.txt
+workflow:
+  name: pvb-p206a3-smoke
+  resources:
+    default:
+      gpu: 1
+      cpu: 16
+      memory: 64Gi
+      storage: 100Gi
+      platform: l20
+  tasks:
+  - name: run
+    image: nvcr.io/nvidia/pytorch:24.10-py3
+    command: ["/bin/bash"]
+    args: ["/tmp/entry.sh"]
+    environment:
+      HF_HUB_OFFLINE: "1"
+      HF_HUB_DISABLE_TELEMETRY: "1"
+      PIP_CONFIG_FILE: /dev/null
+    files:
+    - path: /tmp/entry.sh
+      contents: |
+        set -u
+        ROOT=/osmo/run/workspace/proj_PVB
+        export PRJ_CODE=$ROOT/pvb PRJ_DATA=$ROOT/data PRJ_OUT=$ROOT/out
+        export PRJ_RUN_ID={{workflow_id}}
+        mkdir -p $PRJ_CODE $PRJ_DATA $PRJ_OUT/logs {{output}}
+        LOG=$PRJ_OUT/logs/$PRJ_RUN_ID.log
+        exec > >(tee -a $LOG) 2>&1
+        echo "===== PVB run $PRJ_RUN_ID  $(date '+%F %T')  host=$(hostname) ====="
+        ENV_OK=FAIL; RC=-1
+        # 1. 环境 pvb-env-2（A2 打包：pvb-2 + pvb-py，解压到 /osmo/run/workspace/envs，路径不能改）
+        EXPECT=030033776fc027313a22947eff6ffd27db4c3449664de067c35f7717e19a4df3
+        GOT=$(sha256sum {{input:2}}/pvb-venv-2.tar.gz | cut -d' ' -f1)
+        if [ "$GOT" = "$EXPECT" ]; then
+          mkdir -p /osmo/run/workspace/envs && tar -xzf {{input:2}}/pvb-venv-2.tar.gz -C /osmo/run/workspace/envs && ENV_OK=OK
+        else
+          echo "venv sha256 不符: $GOT"
+        fi
+        PY=/osmo/run/workspace/envs/pvb-2/bin/python
+        echo "env=$ENV_OK $($PY --version 2>&1)"
+        # 2. 代码与权重（权重是软链接，只读）
+        cp -a {{input:0}}/. $PRJ_CODE/
+        GV=$PRJ_CODE/_git_version.txt
+        PRJ_GIT=$( [ -f "$GV" ] && sed -n 's/^git=\([^ ]*\).*/\1/p' "$GV" || echo nogit )
+        echo "code: git=$PRJ_GIT"
+        mkdir -p $PRJ_DATA/models && cp -as {{input:1}}/. $PRJ_DATA/models/ && echo "models: $(ls $PRJ_DATA/models)"
+        touch $ROOT/.start_marker; sleep 1
+        # 3. 冒烟
+        if [ $ENV_OK = OK ]; then
+          cd $PRJ_CODE
+          PYTHONPATH=$PRJ_CODE $PY scripts/p206a_smoke.py --models-dir $PRJ_DATA/models \
+            --only BrainBERT,MVPFormer-S,MVPFormer-M,PopT --report $PRJ_OUT/logs/${PRJ_RUN_ID}_smoke_env2.txt
+          RC=$?
+        fi
+        cd $ROOT
+        { echo "run_id=$PRJ_RUN_ID"; echo "step=scripts/p206a_smoke.py"; echo "git=$PRJ_GIT"; echo "rc=$RC"; echo "finished=$(date '+%F %T')"; } > out/logs/$PRJ_RUN_ID.meta.txt
+        echo "--- 回传文件"
+        find out -type f -newer .start_marker > /tmp/collected.txt 2>/dev/null
+        cat /tmp/collected.txt
+        cp /tmp/collected.txt out/logs/$PRJ_RUN_ID.collected.txt && echo out/logs/$PRJ_RUN_ID.collected.txt >> /tmp/collected.txt
+        echo "SUMMARY env=$ENV_OK rc=$RC git=$PRJ_GIT"
+        sleep 2
+        xargs -a /tmp/collected.txt -r -d '\n' cp --parents -t {{output}}
+        exit 0
+    inputs:
+    - url: s3://tenant-vww8n20rmcahx6ur-20260904-1fbu/pvb/pvb/
+    - url: s3://tenant-vww8n20rmcahx6ur-20260904-1fbu/pvb/data/models/   # A 下好的权重（只读）
+    - url: s3://tenant-vww8n20rmcahx6ur-20260904-1fbu/pvb/env/pvb-env-2/  # A2 的环境包（只读）
+    outputs:
+    - url: s3://tenant-vww8n20rmcahx6ur-20260904-1fbu/pvb/
+  timeout:
+    exec_timeout: 60m

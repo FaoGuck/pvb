@@ -72,6 +72,30 @@ def try_forward(model, dev, shapes):
     return False
 
 
+def real_model_dir(path: Path) -> Path:
+    """软链接目录 → 权重文件所在的真实目录（没有软链接时就是 path 本身）。"""
+    import os
+    for n in ("model.safetensors", "pytorch_model.bin", "config.json"):
+        if (path / n).exists():
+            return Path(os.path.realpath(path / n)).parent
+    return path
+
+
+def try_native(model, dev, shp):
+    """逐通道表征怎么取：试 _native_features / return_features（P206 要每个电极一个向量）。"""
+    import torch
+    x = torch.randn(*shp, device=dev)
+    for n in ("_native_features",):
+        if hasattr(model, n):
+            try:
+                with torch.no_grad():
+                    y = getattr(model, n)(x)
+                d = {k: tuple(v.shape) for k, v in y.items()} if isinstance(y, dict) else (tuple(y.shape) if hasattr(y, "shape") else type(y).__name__)
+                say(f"    {n}{shp} → {d}")
+            except Exception as e:  # noqa: BLE001
+                say(f"    {n}{shp} 失败：{e!r}"[:300])
+
+
 def braindecode_model(tag, names, path, dev, shapes):
     import torch
     say(f"\n===== {tag}（{path.name}）")
@@ -82,7 +106,7 @@ def braindecode_model(tag, names, path, dev, shapes):
         return False
     say(f"  类：{cls.__module__}.{cls.__name__}")
     doc = (inspect.getdoc(cls) or "").splitlines()
-    say("  --- 类说明（前 80 行）"); [say("  | " + ln) for ln in doc[:80]]
+    say("  --- 类说明（全文）"); [say("  | " + ln) for ln in doc]          # 2026-11-27 A3：前 80 行没写到采样率
     try:
         say("  --- __init__ 参数：", str(inspect.signature(cls.__init__))[:1500])
     except Exception as e:  # noqa: BLE001
@@ -97,7 +121,15 @@ def braindecode_model(tag, names, path, dev, shapes):
             except Exception:  # noqa: BLE001
                 pass
     try:
-        m = cls.from_pretrained(str(path))
+        # 2026-11-27 A3：容器里 data/models 是 cp -as 建的软链接，braindecode 2.1 要求权重文件的真实路径在模型目录内
+        #   （A2 因此报 “Weights file must resolve inside the model directory”）→ 用软链接指向的真实目录加载
+        real = real_model_dir(path)
+        say(f"  权重目录（解析软链接后）：{real}")
+        try:
+            m = cls.from_pretrained(str(real))
+        except Exception as e1:  # noqa: BLE001
+            say(f"  from_pretrained 不带参数失败：{e1!r}"[:300] + "；改为 n_outputs=2 再试")
+            m = cls.from_pretrained(str(real), n_outputs=2)
     except Exception as e:  # noqa: BLE001
         say(f"  from_pretrained 失败：{e!r}"[:400]); say(traceback.format_exc()[-1500:]); return False
     m = m.to(dev).eval()
@@ -106,13 +138,23 @@ def braindecode_model(tag, names, path, dev, shapes):
         if hasattr(m, at):
             v = getattr(m, at)
             say(f"    {at} = {str(v)[:200]}")
-    cfgs = [p for p in path.glob("*.json")]
+    try:
+        say("  --- forward 参数：", str(inspect.signature(m.forward))[:800])
+        for n in ("_native_features", "_pool_embedding"):
+            if hasattr(m, n):
+                say(f"  --- {n} 参数：", str(inspect.signature(getattr(m, n)))[:400])
+        say("  --- 顶层子模块：", [k for k, _ in m.named_children()])
+    except Exception as e:  # noqa: BLE001
+        say("  forward 参数读不到", e)
+    cfgs = [p for p in real.glob("*.json")]
     for p in cfgs:
         say(f"  --- {p.name}（前 1500 字）"); say("  " + p.read_text(encoding="utf-8")[:1500].replace("\n", "\n  "))
     n_ch = getattr(m, "n_chans", None) or 4
     n_t = getattr(m, "n_times", None)
     sh = [s for s in shapes(n_ch, n_t)]
     ok = try_forward(m, dev, sh)
+    for shp in sh[:2]:
+        try_native(m, dev, shp)
     try:
         kw = {k: getattr(m, k) for k in ("n_chans", "n_times", "n_outputs", "sfreq", "chs_info") if hasattr(m, k) and getattr(m, k) is not None
               and k in inspect.signature(cls.__init__).parameters}
@@ -158,10 +200,13 @@ def main():
     want = [x for x in a.only.split(",") if x] or ["BrainBERT", "MVPFormer-S", "MVPFormer-M", "PopT", "MOMENT", "Chronos"]
     # 输入形状候选：模型自带 n_times 就用它；否则试 5 s @ 2048 Hz、5 s @ 512 Hz、2 s @ 512 Hz
     shapes_bd = lambda c, t: ([(1, c, t)] if t else []) + [(1, c, 10240), (1, c, 2560), (1, c, 1024)]  # noqa: E731
+    # 2026-11-27 A3：P206 的观测段 2.99 s；BrainBERT 2048 Hz → 6123 点，逐电极放进 batch（n_chans = 1）
+    shapes_bb = lambda c, t: [(8, 1, 6123), (8, 1, 10240), (1, 8, 6123)]  # noqa: E731
+    shapes_mvp = lambda c, t: ([(1, 8, t)] if t else []) + [(1, 8, 2560), (1, 8, 5120), (1, 8, 1531)]  # noqa: E731
     jobs = {
-        "BrainBERT": lambda: braindecode_model("BrainBERT", ["BrainBERT"], md / "brainbert", dev, shapes_bd),
-        "MVPFormer-S": lambda: braindecode_model("MVPFormer-S", ["MVPFormer"], md / "mvpformer_s", dev, shapes_bd),
-        "MVPFormer-M": lambda: braindecode_model("MVPFormer-M", ["MVPFormer"], md / "mvpformer_m", dev, shapes_bd),
+        "BrainBERT": lambda: braindecode_model("BrainBERT", ["BrainBERT"], md / "brainbert", dev, shapes_bb),
+        "MVPFormer-S": lambda: braindecode_model("MVPFormer-S", ["MVPFormer"], md / "mvpformer_s", dev, shapes_mvp),
+        "MVPFormer-M": lambda: braindecode_model("MVPFormer-M", ["MVPFormer"], md / "mvpformer_m", dev, shapes_mvp),
         # PopT 的输入是逐电极的 BrainBERT 表征（768 维）
         "PopT": lambda: braindecode_model("PopT", ["PopulationTransformer", "PopT"], md / "popt", dev,
                                           lambda c, t: [(1, 16, 768), (1, c, t or 768)]),

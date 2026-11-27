@@ -22,7 +22,7 @@ if not exist "%WINSCP%" (
   pause
   exit /b 1
 )
-set "MASK=| raw/; s2r_ref/; *.h5; *.npy; *.pt; *.filepart"
+set "MASK=| raw/; s2r_ref/; models/; *.h5; *.npy; *.pt; *.safetensors; *.filepart"
 if /i "%~1"=="full" set "MASK=| raw/; s2r_ref/; *.filepart"
 set RAWMETA=
 if /i "%~1"=="meta" set RAWMETA="synchronize local -filemask=""*.json; *.tsv; *.txt; *.vhdr; *.vmrk; CHANGES; README*; ccepData_V1.mat; ccepData_V2.mat; ccepData_init.mat | *.filepart"" ""%ROOT%\data\raw"" ""%REMOTE%/data/raw"""

@@ -1,0 +1,183 @@
+# P206 准备 B：T2 的 P202 → P203 → P204（任务 t2raw）和 P205 → P205b（任务 t2base）从闸门 5 人扩到全部 74 人（00 第 14 节 2026-11-27）
+# 由 pvb-p204-obs-gate.yaml（t2raw）和 pvb-p205-baselines-gate.yaml（t2base）拼成的串联工作流（2026-11-27）；驱动脚本 scripts/p2full_t2.py
+# 算法完全不改（同一批脚本、同一份配置），只换患者名单；闸门 5 人包含在内，其结果应与 11-26 相同（运行后核对）
+# 输入走 Bucket 内网（ds004080 全量 ≈ 269 GiB），不占外网带宽，可与 P111 同时跑
+# 预计：t2raw ≈ 1.5 h（拷入 269 GiB + P202 ≈ 7 min + P204 ≈ 60 min）、t2base ≈ 0.5–1 h；1 卡，≈ ¥7
+workflow:
+  name: pvb-p2full-t2
+  resources:
+    default:
+      gpu: 1                  # 只为了落在 L20 节点上；计算在 CPU
+      cpu: 16
+      memory: 90Gi            # P204 每个进程读一个 run（8 进程）；闸门时 64Gi 够用，全量有更大的 run，放宽
+      storage: 330Gi          # ds004080 全量 ≈ 269 GiB + 产出
+      platform: l20
+  tasks:
+  - name: t2raw
+    image: nvcr.io/nvidia/pytorch:24.10-py3
+    command: ["/bin/bash"]
+    args: ["/tmp/entry.sh"]
+    environment:
+      PRJ_STEP: scripts/p2full_t2.py          # ★1
+      PRJ_ARGS: "--stage raw --procs 8"       # ★2（P202 → P203 → P204，全部患者）
+      PRJ_DATA_IN: data/raw/ds004080   # 只用于日志
+      HTTP_PROXY: http://172.26.12.11:3128
+      HTTPS_PROXY: http://172.26.12.11:3128
+      NO_PROXY: localhost,127.0.0.1,172.26.11.53,172.26.0.0/16,10.96.0.0/12,10.244.0.0/12,192.168.0.0/16,10.0.0.0/8,.svc,.svc.cluster.local,.cnomnibot.com
+      PIP_CONFIG_FILE: /dev/null
+    files:
+    - path: /tmp/entry.sh
+      contents: |
+        set -u
+        ROOT=/osmo/run/workspace/proj_PVB
+        export PRJ_CODE=$ROOT/pvb PRJ_DATA=$ROOT/data PRJ_OUT=$ROOT/out
+        export PRJ_RUN_ID={{workflow_id}}_t2raw
+        mkdir -p $PRJ_CODE $PRJ_DATA $PRJ_OUT/logs {{output}}
+        LOG=$PRJ_OUT/logs/$PRJ_RUN_ID.log
+        exec > >(tee -a $LOG) 2>&1
+        echo "===== PVB run $PRJ_RUN_ID  $(date '+%F %T')  host=$(hostname) ====="
+        echo "step=$PRJ_STEP args=$PRJ_ARGS data_in=$PRJ_DATA_IN"
+        ENV_OK=FAIL; CODE_OK=FAIL; DATA_OK=FAIL; RC=-1
+
+        # 1. 环境
+        EXPECT=83d7201844ec4d886b4971c6e7a72ab7c658e642f3ca3cd5a41d196b961eb67f
+        GOT=$(sha256sum {{input:0}}/s2r-venv.tar.gz | cut -d' ' -f1)
+        if [ "$GOT" = "$EXPECT" ]; then
+          mkdir -p /osmo/run/workspace/envs && tar -xzf {{input:0}}/s2r-venv.tar.gz -C /osmo/run/workspace/envs && ENV_OK=OK
+        else
+          echo "venv sha256 不符: $GOT"
+        fi
+        PY=/osmo/run/workspace/envs/s2r/bin/python
+
+        # 2. 代码（复制一份，可写）
+        cp -a {{input:1}}/. $PRJ_CODE/ && [ -f "$PRJ_CODE/$PRJ_STEP" ] && CODE_OK=OK
+        # 提交号：容器里没有 .git（push 时排除），读 push_code.bat 写的 _git_version.txt
+        GV=$PRJ_CODE/_git_version.txt
+        if [ -f "$GV" ]; then
+          PRJ_GIT=$(sed -n 's/^git=\([^ ]*\).*/\1/p' "$GV"); PRJ_GIT_DIRTY=$(sed -n 's/.* dirty=\([0-9]*\).*/\1/p' "$GV")
+        else
+          PRJ_GIT=nogit; PRJ_GIT_DIRTY=-1
+        fi
+        export PRJ_GIT=${PRJ_GIT:-nogit} PRJ_GIT_DIRTY=${PRJ_GIT_DIRTY:--1}
+        echo "code: git=$PRJ_GIT dirty_files=$PRJ_GIT_DIRTY"
+
+        # 3. 数据：按原相对路径放好（目录是真目录，文件是指向输入的软链接，这样新写的文件能和输入区分开）
+        D5=$ROOT/data/raw/ds004080
+        mkdir -p $D5 && cp -as {{input:2}}/. $D5/ && DATA_OK=OK
+        echo "data_in: $(ls -d $D5/sub-* | wc -l) 名患者，$(find -L $D5 -type f | wc -l) 个文件，$(du -shL $D5 | cut -f1)；av_ccep $(find -L $D5/derivatives/av_ccep -type f | wc -l) 个"
+
+        # 4. 运行
+        touch $ROOT/.start_marker; sleep 1
+        if [ "$ENV_OK$CODE_OK$DATA_OK" = "OKOKOK" ]; then
+          cd $PRJ_CODE
+          PYTHONPATH=$PRJ_CODE MPLBACKEND=Agg $PY $PRJ_STEP $PRJ_ARGS
+          RC=$?
+        fi
+
+        # 5. 收集：只把本次新产生或改动过的真实文件，按原相对路径写回（软链接 = 输入，不回传）
+        cd $ROOT
+        {
+          echo "run_id=$PRJ_RUN_ID"; echo "step=$PRJ_STEP $PRJ_ARGS"; echo "data_in=$PRJ_DATA_IN"
+          echo "git=$PRJ_GIT dirty=$PRJ_GIT_DIRTY"; echo "rc=$RC"; echo "finished=$(date '+%F %T')"
+        } > out/logs/$PRJ_RUN_ID.meta.txt
+        echo "--- 回传文件"
+        # 先把完整清单写进文件再显示前几行（11-23 修：原来 `| tee | head` 在 head 退出时连带终止 tee，清单被截断，多出的文件不回传）
+        find data out -type f -newer .start_marker -not -path "*/__pycache__/*" > /tmp/collected.txt 2>/dev/null
+        head -50 /tmp/collected.txt
+        echo "共 $(wc -l < /tmp/collected.txt) 个"
+        cp /tmp/collected.txt out/logs/$PRJ_RUN_ID.collected.txt && echo out/logs/$PRJ_RUN_ID.collected.txt >> /tmp/collected.txt
+        echo "SUMMARY env=$ENV_OK code=$CODE_OK data=$DATA_OK rc=$RC git=$PRJ_GIT"
+        sleep 2
+        xargs -a /tmp/collected.txt -r -d '\n' cp --parents -t {{output}}
+        exit 0
+    inputs:
+    - url: s3://tenant-vww8n20rmcahx6ur-20260904-1fbu/s2r/env/s2r-env-3/
+    - url: s3://tenant-vww8n20rmcahx6ur-20260904-1fbu/pvb/pvb/
+    - url: s3://tenant-vww8n20rmcahx6ur-20260904-1fbu/pvb/data/raw/ds004080/   # 全量 ≈ 269 GiB（Bucket 内网）
+    outputs:
+    - url: s3://tenant-vww8n20rmcahx6ur-20260904-1fbu/pvb/
+  - name: t2base
+    image: nvcr.io/nvidia/pytorch:24.10-py3
+    command: ["/bin/bash"]
+    args: ["/tmp/entry.sh"]
+    environment:
+      PRJ_STEP: scripts/p2full_t2.py          # ★1
+      PRJ_ARGS: "--stage base --procs 12"     # ★2（P205 → P205b，全部有标签的患者）
+      PRJ_DATA_IN: data/t2/d5                 # ★3
+      HTTP_PROXY: http://172.26.12.11:3128
+      HTTPS_PROXY: http://172.26.12.11:3128
+      NO_PROXY: localhost,127.0.0.1,172.26.11.53,172.26.0.0/16,10.96.0.0/12,10.244.0.0/12,192.168.0.0/16,10.0.0.0/8,.svc,.svc.cluster.local,.cnomnibot.com
+      PIP_CONFIG_FILE: /dev/null
+    files:
+    - path: /tmp/entry.sh
+      contents: |
+        set -u
+        ROOT=/osmo/run/workspace/proj_PVB
+        export PRJ_CODE=$ROOT/pvb PRJ_DATA=$ROOT/data PRJ_OUT=$ROOT/out
+        export PRJ_RUN_ID={{workflow_id}}_t2base
+        mkdir -p $PRJ_CODE $PRJ_DATA $PRJ_OUT/logs {{output}}
+        LOG=$PRJ_OUT/logs/$PRJ_RUN_ID.log
+        exec > >(tee -a $LOG) 2>&1
+        echo "===== PVB run $PRJ_RUN_ID  $(date '+%F %T')  host=$(hostname) ====="
+        echo "step=$PRJ_STEP args=$PRJ_ARGS data_in=$PRJ_DATA_IN"
+        ENV_OK=FAIL; CODE_OK=FAIL; DATA_OK=FAIL; RC=-1
+
+        # 1. 环境
+        EXPECT=83d7201844ec4d886b4971c6e7a72ab7c658e642f3ca3cd5a41d196b961eb67f
+        GOT=$(sha256sum {{input:0}}/s2r-venv.tar.gz | cut -d' ' -f1)
+        if [ "$GOT" = "$EXPECT" ]; then
+          mkdir -p /osmo/run/workspace/envs && tar -xzf {{input:0}}/s2r-venv.tar.gz -C /osmo/run/workspace/envs && ENV_OK=OK
+        else
+          echo "venv sha256 不符: $GOT"
+        fi
+        PY=/osmo/run/workspace/envs/s2r/bin/python
+
+        # 2. 代码（复制一份，可写）
+        cp -a {{input:1}}/. $PRJ_CODE/ && [ -f "$PRJ_CODE/$PRJ_STEP" ] && CODE_OK=OK
+        # 提交号：容器里没有 .git（push 时排除），读 push_code.bat 写的 _git_version.txt
+        GV=$PRJ_CODE/_git_version.txt
+        if [ -f "$GV" ]; then
+          PRJ_GIT=$(sed -n 's/^git=\([^ ]*\).*/\1/p' "$GV"); PRJ_GIT_DIRTY=$(sed -n 's/.* dirty=\([0-9]*\).*/\1/p' "$GV")
+        else
+          PRJ_GIT=nogit; PRJ_GIT_DIRTY=-1
+        fi
+        export PRJ_GIT=${PRJ_GIT:-nogit} PRJ_GIT_DIRTY=${PRJ_GIT_DIRTY:--1}
+        echo "code: git=$PRJ_GIT dirty_files=$PRJ_GIT_DIRTY"
+
+        # 3. 数据：按原相对路径放好（目录是真目录，文件是指向输入的软链接，这样新写的文件能和输入区分开）
+        mkdir -p "$ROOT/$PRJ_DATA_IN" && cp -as {{input:2}}/. "$ROOT/$PRJ_DATA_IN/" && DATA_OK=OK
+        echo "data_in: $(find -L "$ROOT/$PRJ_DATA_IN" -type f | wc -l) files"
+
+        # 4. 运行
+        touch $ROOT/.start_marker; sleep 1
+        if [ "$ENV_OK$CODE_OK$DATA_OK" = "OKOKOK" ]; then
+          cd $PRJ_CODE
+          PYTHONPATH=$PRJ_CODE MPLBACKEND=Agg $PY $PRJ_STEP $PRJ_ARGS
+          RC=$?
+        fi
+
+        # 5. 收集：只把本次新产生或改动过的真实文件，按原相对路径写回（软链接 = 输入，不回传）
+        cd $ROOT
+        {
+          echo "run_id=$PRJ_RUN_ID"; echo "step=$PRJ_STEP $PRJ_ARGS"; echo "data_in=$PRJ_DATA_IN"
+          echo "git=$PRJ_GIT dirty=$PRJ_GIT_DIRTY"; echo "rc=$RC"; echo "finished=$(date '+%F %T')"
+        } > out/logs/$PRJ_RUN_ID.meta.txt
+        echo "--- 回传文件"
+        # 先把完整清单写进文件再显示前几行（11-23 修：原来 `| tee | head` 在 head 退出时连带终止 tee，清单被截断，多出的文件不回传）
+        find data out -type f -newer .start_marker -not -path "*/__pycache__/*" > /tmp/collected.txt 2>/dev/null
+        head -50 /tmp/collected.txt
+        echo "共 $(wc -l < /tmp/collected.txt) 个"
+        cp /tmp/collected.txt out/logs/$PRJ_RUN_ID.collected.txt && echo out/logs/$PRJ_RUN_ID.collected.txt >> /tmp/collected.txt
+        echo "SUMMARY env=$ENV_OK code=$CODE_OK data=$DATA_OK rc=$RC git=$PRJ_GIT"
+        sleep 2
+        xargs -a /tmp/collected.txt -r -d '\n' cp --parents -t {{output}}
+        exit 0
+    inputs:
+    - url: s3://tenant-vww8n20rmcahx6ur-20260904-1fbu/s2r/env/s2r-env-3/
+    - url: s3://tenant-vww8n20rmcahx6ur-20260904-1fbu/pvb/pvb/
+    - url: s3://tenant-vww8n20rmcahx6ur-20260904-1fbu/pvb/data/t2/d5/   # ★4（t2raw 回传后的最新版本）
+    - task: t2raw             # t2raw 结束、回传之后才开始
+    outputs:
+    - url: s3://tenant-vww8n20rmcahx6ur-20260904-1fbu/pvb/
+  timeout:
+    exec_timeout: 6h

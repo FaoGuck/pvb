@@ -2,14 +2,14 @@
 # 由 pvb-p204-obs-gate.yaml（t2raw）和 pvb-p205-baselines-gate.yaml（t2base）拼成的串联工作流（2026-11-27）；驱动脚本 scripts/p2full_t2.py
 # 算法完全不改（同一批脚本、同一份配置），只换患者名单；闸门 5 人包含在内，其结果应与 11-26 相同（运行后核对）
 # 输入走 Bucket 内网（ds004080 全量 ≈ 269 GiB），不占外网带宽，可与 P111 同时跑
-# 预计：t2raw ≈ 1.5 h（拷入 269 GiB + P202 ≈ 7 min + P204 ≈ 60 min）、t2base ≈ 0.5–1 h；1 卡，≈ ¥7
+# 预计（4 卡的 CPU / 内存，32 / 48 进程）：t2raw ≈ 40 min（拷入 269 GiB 为主）、t2base ≈ 15 min；≈ 4 卡 × 1 h ≈ ¥11
 workflow:
   name: pvb-p2full-t2
   resources:
     default:
-      gpu: 1                  # 只为了落在 L20 节点上；计算在 CPU
-      cpu: 16
-      memory: 90Gi            # P204 每个进程读一个 run（8 进程）；闸门时 64Gi 够用，全量有更大的 run，放宽
+      gpu: 4                  # 计算在 CPU；申请 4 卡是为了拿到同一节点 4 倍的 CPU 与内存（11-27 时间优先，取消限额）
+      cpu: 60
+      memory: 360Gi           # P202 / P204 每个进程读一个 run（32 进程，每个最多约 8 GB）
       storage: 330Gi          # ds004080 全量 ≈ 269 GiB + 产出
       platform: l20
   tasks:
@@ -19,12 +19,15 @@ workflow:
     args: ["/tmp/entry.sh"]
     environment:
       PRJ_STEP: scripts/p2full_t2.py          # ★1
-      PRJ_ARGS: "--stage raw --procs 8"       # ★2（P202 → P203 → P204，全部患者）
+      PRJ_ARGS: "--stage raw --procs 32"      # ★2（P202 → P203 → P204，全部患者）
       PRJ_DATA_IN: data/raw/ds004080   # 只用于日志
       HTTP_PROXY: http://172.26.12.11:3128
       HTTPS_PROXY: http://172.26.12.11:3128
       NO_PROXY: localhost,127.0.0.1,172.26.11.53,172.26.0.0/16,10.96.0.0/12,10.244.0.0/12,192.168.0.0/16,10.0.0.0/8,.svc,.svc.cluster.local,.cnomnibot.com
       PIP_CONFIG_FILE: /dev/null
+      OMP_NUM_THREADS: "1"             # 32 / 48 个进程并行时，每个进程的数值库只用 1 个线程（避免互相抢核）
+      MKL_NUM_THREADS: "1"
+      OPENBLAS_NUM_THREADS: "1"
     files:
     - path: /tmp/entry.sh
       contents: |
@@ -102,12 +105,15 @@ workflow:
     args: ["/tmp/entry.sh"]
     environment:
       PRJ_STEP: scripts/p2full_t2.py          # ★1
-      PRJ_ARGS: "--stage base --procs 12"     # ★2（P205 → P205b，全部有标签的患者）
+      PRJ_ARGS: "--stage base --procs 48"     # ★2（P205 → P205b，全部有标签的患者）
       PRJ_DATA_IN: data/t2/d5                 # ★3
       HTTP_PROXY: http://172.26.12.11:3128
       HTTPS_PROXY: http://172.26.12.11:3128
       NO_PROXY: localhost,127.0.0.1,172.26.11.53,172.26.0.0/16,10.96.0.0/12,10.244.0.0/12,192.168.0.0/16,10.0.0.0/8,.svc,.svc.cluster.local,.cnomnibot.com
       PIP_CONFIG_FILE: /dev/null
+      OMP_NUM_THREADS: "1"             # 32 / 48 个进程并行时，每个进程的数值库只用 1 个线程（避免互相抢核）
+      MKL_NUM_THREADS: "1"
+      OPENBLAS_NUM_THREADS: "1"
     files:
     - path: /tmp/entry.sh
       contents: |
